@@ -1,115 +1,93 @@
 """
-Auth routes — register, login, profile, password change
+Authentication — JWT tokens + password hashing
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+import os
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import jwt
+from jwt.exceptions import PyJWTError as JWTError
+import bcrypt
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.database import get_db
-from app.auth import hash_password, verify_password, create_access_token, get_current_user
 from app.models.models import User
-from app.models.schemas import (
-    RegisterRequest, LoginRequest, TokenResponse,
-    UserResponse, UserUpdate, PasswordChangeRequest,
-)
 
-router = APIRouter(prefix="/api/auth", tags=["auth"])
+# Config
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "dev-secret-change-me-in-production")
+ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 
-
-@router.post("/register", response_model=TokenResponse)
-async def register(data: RegisterRequest, db: AsyncSession = Depends(get_db)):
-    """Create a new account and return JWT."""
-    existing = await db.execute(select(User).where(User.email == data.email))
-    if existing.scalar_one_or_none():
-        raise HTTPException(status_code=409, detail="Email already registered")
-
-    user = User(
-        email=data.email,
-        name=data.name,
-        hashed_password=hash_password(data.password),
-    )
-    db.add(user)
-    await db.flush()
-
-    token = create_access_token(user.id)
-    return TokenResponse(
-        access_token=token,
-        user=UserResponse(
-            id=user.id, email=user.email, name=user.name,
-            email_verified=False, stripe_connect_onboarded=False,
-            created_at=user.created_at,
-        ),
-    )
+security = HTTPBearer(auto_error=False)
 
 
-@router.post("/login", response_model=TokenResponse)
-async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
-    """Authenticate with email + password, return JWT."""
-    result = await db.execute(select(User).where(User.email == data.email))
+# ── Password helpers ───────────────────────────────────────────────────────
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
+
+
+# ── JWT helpers ────────────────────────────────────────────────────────────
+
+def create_access_token(user_id: str, expires_delta: Optional[timedelta] = None) -> str:
+    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    payload = {"sub": user_id, "exp": expire, "iat": datetime.now(timezone.utc)}
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_token(token: str) -> Optional[str]:
+    """Returns user_id or None"""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload.get("sub")
+    except JWTError:
+        return None
+
+
+# ── FastAPI Dependencies ───────────────────────────────────────────────────
+
+async def get_current_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """Require a valid JWT. Returns the User ORM object."""
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    user_id = decode_token(credentials.credentials)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
-
-    if not user or not verify_password(data.password, user.hashed_password):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-
-    token = create_access_token(user.id)
-    return TokenResponse(
-        access_token=token,
-        user=UserResponse(
-            id=user.id, email=user.email, name=user.name,
-            avatar_url=user.avatar_url, bio=user.bio,
-            email_verified=user.email_verified,
-            stripe_connect_onboarded=user.stripe_connect_onboarded,
-            created_at=user.created_at,
-        ),
-    )
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
 
 
-@router.get("/me", response_model=UserResponse)
-async def get_me(user: User = Depends(get_current_user)):
-    """Get current authenticated user profile."""
-    return UserResponse(
-        id=user.id, email=user.email, name=user.name,
-        avatar_url=user.avatar_url, bio=user.bio,
-        email_verified=user.email_verified,
-        stripe_connect_onboarded=user.stripe_connect_onboarded,
-        created_at=user.created_at,
-    )
-
-
-@router.put("/me", response_model=UserResponse)
-async def update_me(
-    data: UserUpdate,
-    user: User = Depends(get_current_user),
+async def get_optional_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     db: AsyncSession = Depends(get_db),
-):
-    """Update current user's profile."""
-    if data.name is not None:
-        user.name = data.name
-    if data.bio is not None:
-        user.bio = data.bio
-    if data.avatar_url is not None:
-        user.avatar_url = data.avatar_url
-    await db.flush()
-
-    return UserResponse(
-        id=user.id, email=user.email, name=user.name,
-        avatar_url=user.avatar_url, bio=user.bio,
-        email_verified=user.email_verified,
-        stripe_connect_onboarded=user.stripe_connect_onboarded,
-        created_at=user.created_at,
-    )
+) -> Optional[User]:
+    """Same as above but returns None instead of 401 if no token."""
+    if not credentials:
+        return None
+    user_id = decode_token(credentials.credentials)
+    if not user_id:
+        return None
+    result = await db.execute(select(User).where(User.id == user_id))
+    return result.scalar_one_or_none()
 
 
-@router.post("/change-password")
-async def change_password(
-    data: PasswordChangeRequest,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Change the authenticated user's password."""
-    if not verify_password(data.current_password, user.hashed_password):
-        raise HTTPException(status_code=400, detail="Current password is incorrect")
-    user.hashed_password = hash_password(data.new_password)
-    await db.flush()
-    return {"message": "Password updated"}
+async def require_admin(user: User = Depends(get_current_user)) -> User:
+    """Require the current user to be an admin."""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user

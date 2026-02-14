@@ -8,6 +8,7 @@ import json
 from unittest.mock import patch, MagicMock, AsyncMock
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db
 from app.auth import hash_password, create_access_token
@@ -15,7 +16,7 @@ from app.models.models import User
 
 # ── Test DB setup ──────────────────────────────────────────────────────────
 
-TEST_DB_URL = "sqlite+aiosqlite:///:memory:"
+TEST_DB_URL = "sqlite+aiosqlite:///file:testdb?mode=memory&cache=shared&uri=true"
 test_engine = create_async_engine(TEST_DB_URL, echo=False)
 TestSession = async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
 
