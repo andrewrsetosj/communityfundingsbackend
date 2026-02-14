@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+pyjwt[crypto]       # for RS256 verification
+requests            # for JWKS fetching
+asyncpg
+python-dotenv
