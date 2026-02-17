@@ -1,4 +1,3 @@
-
 """
 Authentication — JWT tokens + password hashing
 """
@@ -47,7 +46,7 @@ def decode_token(token: str) -> Optional[str]:
     """Returns user_id or None"""
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+        return payload.get("sub")
     except JWTError:
         return None
 

@@ -1,3 +1,4 @@
+# app/auth.py
 """
 Authentication — JWT tokens + password hashing
 """
@@ -5,13 +6,14 @@ Authentication — JWT tokens + password hashing
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-import jwt
-from jwt.exceptions import PyJWTError as JWTError
+
 import bcrypt
-from sqlalchemy.ext.asyncio import AsyncSession
+import jwt
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jwt.exceptions import PyJWTError as JWTError
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.models import User
@@ -38,15 +40,16 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def create_access_token(user_id: str, expires_delta: Optional[timedelta] = None) -> str:
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-    payload = {"sub": user_id, "exp": expire, "iat": datetime.now(timezone.utc)}
+    payload = {"sub": str(user_id), "exp": expire, "iat": datetime.now(timezone.utc)}
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
 def decode_token(token: str) -> Optional[str]:
-    """Returns user_id or None"""
+    """Returns user_id (sub) or None."""
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload.get("sub")
+        sub = payload.get("sub")
+        return str(sub) if sub else None
     except JWTError:
         return None
 
