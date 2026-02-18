@@ -4,7 +4,7 @@ Full crowdfunding platform with Stripe + PostgreSQL RDS
 """
 
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
