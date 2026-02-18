@@ -126,6 +126,16 @@ async def protected_handler(payload: dict = Depends(get_current_user)):
     user_id = payload['sub']
     ...
 
+@app.get("/health/db")
+async def health_check_db():
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("SELECT 1;")
+        return {"status": "ok", "db": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
 
 
 if __name__ == "__main__":

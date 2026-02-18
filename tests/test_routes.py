@@ -87,3 +87,34 @@ async def test_invalid_token(monkeypatch):
         resp = await ac.post("/api/auth/verify-and-store", headers=headers, json={})
     assert resp.status_code == 401
     assert "Invalid token" in resp.json().get("detail", "")
+
+
+@pytest.mark.asyncio
+async def test_health_db_success(monkeypatch):
+    import main
+
+    class DummyConn:
+        async def execute(self, sql):
+            assert "SELECT 1" in sql
+
+    class DummyAcquire:
+        async def __aenter__(self):
+            return DummyConn()
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class DummyPool:
+        def acquire(self):
+            return DummyAcquire()
+
+    async def fake_get_pool():
+        return DummyPool()
+
+    monkeypatch.setattr(main, "get_pool", fake_get_pool)
+
+    async with AsyncClient(app=app, base_url="http://testserver") as ac:
+        resp = await ac.get("/health/db")
+
+    assert resp.status_code == 200
+    assert resp.json()["db"] == "ok"
+
