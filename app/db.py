@@ -1,32 +1,49 @@
-# db.py
+# app/db.py
+"""
+AsyncPG helper module for simple creators upserts and minimal schema init.
+
+- Uses asyncpg connection pool.
+- init_db() only ensures the `creators` table exists (safe for dev).
+- Provides upsert_creator(...) to insert or update a creator by creator_id.
+"""
+
+from __future__ import annotations
+import os
 import re
 import sys
-import datetime
 import traceback
-import os
+import datetime
+from typing import Optional, Any
+
 import asyncpg
 from dotenv import load_dotenv
-from typing import Optional, Any
 
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    DATABASE_URL = None
+# Read DB URL from environment (expected to be postgresql+asyncpg://... or postgresql://...)
+DATABASE_URL: Optional[str] = os.getenv("DATABASE_URL") or None
 
 _pool: Optional[asyncpg.pool.Pool] = None
 
 
 def _normalize_for_asyncpg(dsn: Optional[str]) -> Optional[str]:
+    """
+    Convert SQLAlchemy-style 'postgresql+asyncpg://...' into 'postgresql://...' (asyncpg accepts either).
+    Returns the original dsn if no change needed.
+    """
     if not dsn:
         return dsn
     m = re.match(r"(?P<scheme>[^:\/]+)\+(?P<driver>[^:\/]+)(?P<rest>://.*)$", dsn)
     if m:
-        return m.group("scheme") + m.group("rest")
+        return f"{m.group('scheme')}{m.group('rest')}"
     return dsn
 
 
 async def get_pool() -> asyncpg.pool.Pool:
+    """
+    Lazily create and return an asyncpg pool.
+    Raises RuntimeError if DATABASE_URL is not configured.
+    """
     global _pool
     if _pool is None:
         if not DATABASE_URL:
@@ -42,12 +59,15 @@ async def get_pool() -> asyncpg.pool.Pool:
     return _pool
 
 
-async def init_db():
+async def init_db() -> None:
     """
-    Initialize DB schema required by the app. Safe to call at startup.
+    Create minimal schema required by the app. Safe to call at startup.
+    Only creates the `creators` table (IF NOT EXISTS) to avoid touching other tables.
     """
     if not DATABASE_URL:
+        # nothing to do in environments without DB configured
         return
+
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -64,13 +84,8 @@ async def init_db():
             );
             """
         )
+    print("✅ asyncpg creators table ensured")
 
-# db.py -> replace the previous upsert_creator with this function
-
-from typing import Optional, Any
-import datetime
-import traceback
-import sys
 
 async def upsert_creator(
     creator_id: str,
@@ -80,20 +95,17 @@ async def upsert_creator(
     time_creation: Optional[datetime.datetime] = None,
 ) -> Any:
     """
-    Upsert a creators row using creator_id as the unique key.
-    Only writes: creator_id, first_name, last_name, email, time_creation.
-    Does NOT touch is_business (leaves DB default as-is).
+    Insert or update a creators row using creator_id as the unique key.
+
+    Returns the returned row from the DB (asyncpg.Record) or None on failure.
     """
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is not configured; cannot upsert creator")
 
-    # If caller didn't provide time_creation, let DB set NOW() by passing NULL
-    # We can pass Python datetime if provided.
     pool = await get_pool()
     async with pool.acquire() as conn:
         try:
             if time_creation is None:
-                # Use NOW() on insert (pass NULL for the parameter)
                 row = await conn.fetchrow(
                     """
                     INSERT INTO creators (creator_id, first_name, last_name, email, time_creation)
@@ -110,7 +122,6 @@ async def upsert_creator(
                     email,
                 )
             else:
-                # If time_creation provided, pass it as a parameter
                 row = await conn.fetchrow(
                     """
                     INSERT INTO creators (creator_id, first_name, last_name, email, time_creation)
@@ -130,10 +141,18 @@ async def upsert_creator(
                 )
 
             if not row:
-                row = await conn.fetchrow("SELECT * FROM creators WHERE creator_id = $1 LIMIT 1", creator_id)
+                # Fallback read (should rarely be necessary)
+                row = await conn.fetchrow(
+                    "SELECT * FROM creators WHERE creator_id = $1 LIMIT 1", creator_id
+                )
 
-            # Optional debug print
-            print("DEBUG: upsert_creator returned:", dict(row) if row else None)
+            # convert to dict for easy logging (asyncpg.Record -> dict-like)
+            try:
+                row_dict = dict(row) if row else None
+            except Exception:
+                row_dict = None
+
+            print("DEBUG: upsert_creator returned:", row_dict)
             return row
 
         except Exception:
@@ -142,11 +161,21 @@ async def upsert_creator(
             raise
 
 
-# Optional helper to explicitly close the pool (useful in tests)
-async def close_pool():
+async def close_pool() -> None:
+    """Explicitly close the asyncpg pool (useful for tests / graceful shutdown)."""
     global _pool
     if _pool is not None:
         try:
             await _pool.close()
         finally:
             _pool = None
+
+
+# what this module exports
+__all__ = [
+    "DATABASE_URL",
+    "get_pool",
+    "init_db",
+    "upsert_creator",
+    "close_pool",
+]

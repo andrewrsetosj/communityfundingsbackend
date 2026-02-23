@@ -9,7 +9,7 @@ from main import app
 
 # We'll monkeypatch jwt_utils.verify_token and db.get_pool
 import jwt_utils
-import db as db_module
+import app.db as db_module
 
 # Dummy DB connection objects to capture SQL executed
 class DummyConn:
