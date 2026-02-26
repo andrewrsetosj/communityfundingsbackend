@@ -9,7 +9,7 @@ import os
 import sys
 import traceback
 from contextlib import asynccontextmanager
-
+from app.routes.campaign_page import router as campaign_page_router
 from fastapi import FastAPI, Header, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -97,6 +97,7 @@ app.include_router(comments_router)
 app.include_router(reports_router)
 app.include_router(uploads_router)
 app.include_router(admin_router)
+app.include_router(campaign_page_router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
