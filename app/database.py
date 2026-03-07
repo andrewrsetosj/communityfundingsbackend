@@ -58,6 +58,9 @@ from sqlalchemy.orm import DeclarativeBase
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./community_fundings.db")
 
+if DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+
 # Create an async engine but DO NOT call create_all() automatically.
 engine = create_async_engine(
     DATABASE_URL,

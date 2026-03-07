@@ -40,22 +40,23 @@ def _normalize_for_asyncpg(dsn: Optional[str]) -> Optional[str]:
 
 
 async def get_pool() -> asyncpg.pool.Pool:
-    """
-    Lazily create and return an asyncpg pool.
-    Raises RuntimeError if DATABASE_URL is not configured.
-    """
     global _pool
     if _pool is None:
         if not DATABASE_URL:
             raise RuntimeError("DATABASE_URL is not configured in environment")
         dsn = _normalize_for_asyncpg(DATABASE_URL)
-        # Mask DSN in logs so password isn't exposed
         try:
             masked = re.sub(r":\/\/(.*@)", "://***@", dsn)
         except Exception:
             masked = (dsn[:60] + "...") if dsn else None
         print("DEBUG: asyncpg DSN (masked):", masked)
-        _pool = await asyncpg.create_pool(dsn, min_size=1, max_size=10)
+
+        _pool = await asyncpg.create_pool(
+            dsn,
+            min_size=1,
+            max_size=10,
+            ssl="require",
+        )
     return _pool
 
 
