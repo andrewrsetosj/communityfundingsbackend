@@ -69,6 +69,72 @@ def _slug(raw: str) -> str:
     return s or "campaign"
 
 
+async def _ensure_creator_exists(
+    conn: asyncpg.Connection,
+    creator_id: str,
+    bio: str | None,
+) -> None:
+    """
+    Insert creator row if missing.
+    Supports both known creators table shapes:
+    - (creator_id, user_type, name, last_name, email, time_creation)
+    - (creator_id, first_name, last_name, email, time_creation, is_business, bio)
+    """
+    exists = await conn.fetchrow(
+        "SELECT 1 FROM public.creators WHERE creator_id = $1 LIMIT 1",
+        creator_id,
+    )
+    if exists:
+        return
+
+    placeholder_email = f"{creator_id}@communityfundings.placeholder"
+    display_name = (bio or "").strip()[:200] or "Creator"
+
+    cols = await conn.fetch(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'creators'
+        """
+    )
+    colset = {r["column_name"] for r in cols}
+
+    # Build an insert statement based on available columns.
+    insert_cols: list[str] = ["creator_id"]
+    values: list[Any] = [creator_id]
+
+    if "user_type" in colset:
+        insert_cols.append("user_type")
+        values.append(1)
+    if "name" in colset:
+        insert_cols.append("name")
+        values.append(display_name)
+    if "first_name" in colset:
+        insert_cols.append("first_name")
+        values.append(display_name)
+    if "last_name" in colset:
+        insert_cols.append("last_name")
+        values.append("")
+    if "email" in colset:
+        insert_cols.append("email")
+        values.append(placeholder_email)
+    if "is_business" in colset:
+        insert_cols.append("is_business")
+        values.append(False)
+    if "bio" in colset:
+        insert_cols.append("bio")
+        values.append((bio or "").strip() or None)
+
+    placeholders = ", ".join(f"${i}" for i in range(1, len(insert_cols) + 1))
+    columns_sql = ", ".join(insert_cols)
+    sql = (
+        f"INSERT INTO public.creators ({columns_sql}) "
+        f"VALUES ({placeholders}) "
+        "ON CONFLICT (creator_id) DO NOTHING"
+    )
+    await conn.execute(sql, *values)
+
+
 async def finalize_campaign(data: dict[str, Any]) -> dict[str, Any]:
     """
     Insert one row into public.campaigns (your DDL).
@@ -87,19 +153,7 @@ async def finalize_campaign(data: dict[str, Any]) -> dict[str, Any]:
     # Unique url (vanity slug)
     url = _slug(data.get("vanity_slug") or title) or _slug(title)
     async with pool.acquire() as conn:
-        # Ensure creator exists (creators: creator_id PK, email NOT NULL UNIQUE, first_name/last_name/bio optional)
-        placeholder_email = f"{creator_id}@communityfundings.placeholder"
-        first_name = (data.get("bio") or "").strip()[:200] or "Creator"
-        await conn.execute(
-            """
-            INSERT INTO public.creators (creator_id, email, first_name)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (creator_id) DO NOTHING
-            """,
-            creator_id,
-            placeholder_email,
-            first_name,
-        )
+        await _ensure_creator_exists(conn, creator_id, data.get("bio"))
 
         # Ensure url unique: if taken, append suffix
         row = await conn.fetchrow(
