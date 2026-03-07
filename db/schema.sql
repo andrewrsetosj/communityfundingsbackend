@@ -18,7 +18,7 @@ BEGIN;
 -- 1) Creators (users + orgs)
 -- ----------------------------
 CREATE TABLE IF NOT EXISTS creators (
-  creator_id     BIGSERIAL PRIMARY KEY,
+  creator_id     TEXT PRIMARY KEY,
   user_type      SMALLINT NOT NULL CHECK (user_type IN (0, 1)), -- 0=organization, 1=user
   name           TEXT NOT NULL,
   last_name      TEXT,
@@ -34,8 +34,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS creators_email_unique
 -- 2) Organization Members (bridge)
 -- -----------------------------------
 CREATE TABLE IF NOT EXISTS organization_members (
-  member_id        BIGINT NOT NULL,
-  organization_id  BIGINT NOT NULL,
+  member_id        TEXT NOT NULL,
+  organization_id  TEXT NOT NULL,
   PRIMARY KEY (member_id, organization_id),
   CONSTRAINT fk_org_members_member
     FOREIGN KEY (member_id) REFERENCES creators (creator_id)
@@ -58,10 +58,19 @@ CREATE INDEX IF NOT EXISTS idx_org_members_member
 -- ----------------------------
 CREATE TABLE IF NOT EXISTS campaigns (
   campaign_id   BIGSERIAL PRIMARY KEY,
-  creator_id    BIGINT NOT NULL,     -- campaign owner (user or org)
+  creator_id    TEXT NOT NULL,     -- campaign owner (user or org)
   title         TEXT NOT NULL,
   status        TEXT NOT NULL,       -- e.g., 'active', 'closed'
   time_created  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  url           TEXT,
+  description   TEXT,
+  category      TEXT,
+  "location"    TEXT,
+  funding_goal_cents BIGINT DEFAULT 0,
+  duration_days INTEGER,
+  amount_raised_cents BIGINT DEFAULT 0,
+  backers       INTEGER DEFAULT 0,
+  end_date      TIMESTAMPTZ,
   CONSTRAINT fk_campaigns_creator
     FOREIGN KEY (creator_id) REFERENCES creators (creator_id)
     ON DELETE RESTRICT
@@ -79,7 +88,7 @@ CREATE INDEX IF NOT EXISTS idx_campaigns_status
 CREATE TABLE IF NOT EXISTS donations (
   donation_id       BIGSERIAL PRIMARY KEY,
   campaign_id       BIGINT NOT NULL,
-  donor_creator_id  BIGINT NOT NULL, -- donor (should be user_type=1 in app logic)
+  donor_creator_id  TEXT NOT NULL, -- donor (should be user_type=1 in app logic)
   amount            NUMERIC(12,2) NOT NULL CHECK (amount > 0),
   status            TEXT NOT NULL,   -- 'paid'/'failed'/'refunded'
   time_created      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -151,7 +160,7 @@ CREATE INDEX IF NOT EXISTS idx_fees_donation
 CREATE TABLE IF NOT EXISTS payouts (
   payout_id        BIGSERIAL PRIMARY KEY,
   campaign_id      BIGINT NOT NULL,
-  payee_creator_id BIGINT NOT NULL, -- payout recipient (user or org)
+  payee_creator_id TEXT NOT NULL, -- payout recipient (user or org)
   amount           NUMERIC(12,2) NOT NULL CHECK (amount > 0),
   time_initiated   TIMESTAMPTZ,
   time_paid        TIMESTAMPTZ,
@@ -201,7 +210,7 @@ CREATE INDEX IF NOT EXISTS idx_refunds_status
 -- 9) Saved Campaigns (history/bookmark)
 -- ----------------------------
 CREATE TABLE IF NOT EXISTS saved_campaigns (
-  creator_id       BIGINT NOT NULL, -- saver (should be user_type=1 in app logic)
+  creator_id       TEXT NOT NULL, -- saver (should be user_type=1 in app logic)
   campaign_id      BIGINT NOT NULL,
   engagement_type  SMALLINT NOT NULL CHECK (engagement_type IN (0, 1)), -- 0=history, 1=bookmark
   time_created     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -222,7 +231,7 @@ CREATE INDEX IF NOT EXISTS idx_saved_campaigns_campaign
 -- ----------------------------
 CREATE TABLE IF NOT EXISTS reports (
   report_id     BIGSERIAL PRIMARY KEY,
-  reporter_id   BIGINT NOT NULL, -- creator filing report (should be user_type=1 in app logic)
+  reporter_id   TEXT NOT NULL, -- creator filing report (should be user_type=1 in app logic)
   campaign_id   BIGINT NOT NULL,
   strength_id   BIGINT,          -- placeholder for weighting system
   time_created  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -254,7 +263,7 @@ CREATE TABLE IF NOT EXISTS campaign_photos (
   height_px       INT CHECK (height_px >= 0),
   is_primary      BOOLEAN NOT NULL DEFAULT FALSE,
   sort_order      INT NOT NULL DEFAULT 0,
-  uploaded_by_creator_id BIGINT,
+  uploaded_by_creator_id TEXT,
   time_created    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT fk_campaign_photos_campaign
     FOREIGN KEY (campaign_id) REFERENCES campaigns (campaign_id)
@@ -284,7 +293,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_campaign_photos_s3_object
 CREATE TABLE IF NOT EXISTS comments (
   comment_id     BIGSERIAL PRIMARY KEY,
   comment_text   TEXT NOT NULL CHECK (length(trim(comment_text)) > 0),
-  creator_id     BIGINT NOT NULL,
+  creator_id     TEXT NOT NULL,
   campaign_id    BIGINT NOT NULL,
   time_created   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT fk_comments_creator
@@ -314,7 +323,7 @@ CREATE TABLE IF NOT EXISTS interests (
 );
 
 CREATE TABLE IF NOT EXISTS creator_interests (
-  creator_id   BIGINT NOT NULL,
+  creator_id   TEXT NOT NULL,
   interest_id  BIGINT NOT NULL,
   PRIMARY KEY (creator_id, interest_id),
   CONSTRAINT fk_creator_interests_creator

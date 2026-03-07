@@ -5,6 +5,13 @@ Database connection — async SQLAlchemy + asyncpg for PostgreSQL RDS
 import os
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy import text
+
+from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy import MetaData
+
+class Base(DeclarativeBase):
+    metadata = MetaData(schema="public")
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -21,6 +28,11 @@ engine = create_async_engine(
     echo=False,
     pool_pre_ping=True,
     pool_recycle=300,
+    connect_args={
+        "server_settings": {
+            "search_path": "public"
+        }
+    },
 )
 
 AsyncSessionLocal = async_sessionmaker(
@@ -42,4 +54,5 @@ async def get_db():
 
 async def init_db():
     async with engine.begin() as conn:
+        await conn.execute(text("SET search_path TO public"))
         await conn.run_sync(Base.metadata.create_all)

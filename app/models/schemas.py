@@ -78,6 +78,50 @@ class UserPublicResponse(BaseModel):
 # Campaigns
 # ════════════════════════════════════════════════════════════════════════════
 
+
+class RewardDraftSchema(BaseModel):
+    title: str = ""
+    required_amount_cents: int = 0
+    description: str = ""
+    limit_total: Optional[int] = None
+    display_order: int = 0
+
+
+class FaqDraftSchema(BaseModel):
+    question: str = ""
+    answer: str = ""
+    display_order: int = 0
+
+
+class CollaboratorDraftSchema(BaseModel):
+    email: str = ""
+
+
+class PaymentDraftSchema(BaseModel):
+    account_type: str = "individual"
+    account_holder_name: str = ""
+    routing_number: str = ""
+    account_number: str = ""
+    confirm_account_number: str = ""
+
+
+class CampaignFinalize(BaseModel):
+    """Payload from create-project flow (Submit for Review)."""
+    creator_id: str = ""
+    title: str = Field(..., min_length=1, max_length=200)
+    category: Optional[str] = None
+    location: Optional[str] = None
+    funding_goal_cents: int = Field(..., ge=1)
+    duration_days: Optional[int] = Field(None, ge=1, le=365)
+    rewards: List[RewardDraftSchema] = []
+    description_html: str = Field(..., min_length=1)
+    faqs: List[FaqDraftSchema] = []
+    bio: Optional[str] = None
+    vanity_slug: Optional[str] = None
+    co_creators: List[CollaboratorDraftSchema] = []
+    payment: Optional[PaymentDraftSchema] = None
+
+
 class CampaignCreate(BaseModel):
     title: str = Field(..., min_length=5, max_length=200)
     short_description: Optional[str] = Field(None, max_length=300)

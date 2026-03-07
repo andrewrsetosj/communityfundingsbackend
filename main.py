@@ -1,47 +1,34 @@
 """
-Community Fundings — FastAPI Backend
-Full crowdfunding platform with Stripe + PostgreSQL RDS
+Minimal backend: health + POST /api/campaigns/finalize.
+No SQLAlchemy ORM, no table creation — uses db.py (asyncpg) to insert into your existing campaigns table.
 """
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
 import os
+from contextlib import asynccontextmanager
+
 from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
-from app.database import init_db, engine
-from app.routes.auth import router as auth_router
-from app.routes.campaigns import router as campaigns_router
-from app.routes.payments import router as payments_router
-from app.routes.refunds import router as refunds_router
-from app.routes.users import router as users_router
-from app.routes.updates import router as updates_router
-from app.routes.comments import router as comments_router
-from app.routes.reports import router as reports_router
-from app.routes.uploads import router as uploads_router
-from app.routes.admin import router as admin_router
+print("DATABASE_URL:", os.getenv("DATABASE_URL"))
+
+import db
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("🚀 Starting Community Fundings API...")
-    await init_db()
-    print("✅ Database tables ready")
     yield
-    await engine.dispose()
-    print("👋 Shutdown complete")
+    await db.close_pool()
 
 
 app = FastAPI(
     title="Community Fundings API",
-    description="Full crowdfunding platform — Stripe payments, Stripe Connect payouts, PostgreSQL RDS",
-    version="3.0.0",
+    version="1.0.0",
     lifespan=lifespan,
 )
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -54,38 +41,67 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Mount all routers ──────────────────────────────────────────────────────
-app.include_router(auth_router)
-app.include_router(campaigns_router)
-app.include_router(payments_router)
-app.include_router(refunds_router)
-app.include_router(users_router)
-app.include_router(updates_router)
-app.include_router(comments_router)
-app.include_router(reports_router)
-app.include_router(uploads_router)
-app.include_router(admin_router)
-
 
 @app.get("/")
 async def root():
     return {
         "status": "healthy",
-        "service": "Community Fundings API v3",
-        "database": "PostgreSQL RDS",
-        "payments": "Stripe + Stripe Connect",
+        "service": "Community Fundings API",
     }
 
 
 @app.get("/api/config")
 async def get_config():
-    """Public config the frontend needs (no secrets!)."""
     return {
         "stripe_publishable_key": os.getenv("STRIPE_PUBLISHABLE_KEY", ""),
         "platform_fee_percent": float(os.getenv("PLATFORM_FEE_PERCENT", "5.0")),
     }
 
 
+@app.get("/api/campaigns/check-slug")
+async def check_slug(slug: str):
+    """
+    Check if a vanity slug is available.
+    Query param: slug
+    Returns: {"available": true/false}
+    """
+    if not slug or not slug.strip():
+        raise HTTPException(status_code=400, detail="Slug is required")
+    try:
+        available = await db.check_slug_available(slug)
+        return {"available": available}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/campaigns/finalize")
+async def finalize_campaign(data: dict):
+    """
+    Submit campaign draft from create-project payment page.
+    Body = full draft JSON (creator_id, title, description_html, vanity_slug, etc.).
+    Inserts into public.campaigns; returns { campaign_id, slug }.
+    """
+    try:
+        result = await db.finalize_campaign(data)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        err = str(e).lower()
+        if "does not exist" in err or "undefinedtable" in err:
+            raise HTTPException(
+                status_code=503,
+                detail="Database table public.campaigns is missing. Run your DDL to create it.",
+            )
+        if "foreign key" in err or "foreignkey" in err:
+            raise HTTPException(
+                status_code=400,
+                detail="creator_id must exist in public.creators(creator_id). Add the creator first.",
+            )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.getenv("PORT", "4000"))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
