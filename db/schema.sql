@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS creators (
   name           TEXT NOT NULL,
   last_name      TEXT,
   email          TEXT,
+  bio            VARCHAR(500),
   time_creation  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -59,11 +60,11 @@ CREATE INDEX IF NOT EXISTS idx_org_members_member
 CREATE TABLE IF NOT EXISTS campaigns (
   campaign_id   BIGSERIAL PRIMARY KEY,
   creator_id    TEXT NOT NULL,     -- campaign owner (user or org)
-  title         TEXT NOT NULL,
+  title         VARCHAR(100) NOT NULL,
   status        TEXT NOT NULL,       -- e.g., 'active', 'closed'
   time_created  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  url           TEXT,
-  description   TEXT,
+  url           TEXT UNIQUE,
+  description_html TEXT,
   category      TEXT,
   "location"    TEXT,
   funding_goal_cents BIGINT DEFAULT 0,
@@ -71,6 +72,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   amount_raised_cents BIGINT DEFAULT 0,
   backers       INTEGER DEFAULT 0,
   end_date      TIMESTAMPTZ,
+  bio           VARCHAR(500),
   CONSTRAINT fk_campaigns_creator
     FOREIGN KEY (creator_id) REFERENCES creators (creator_id)
     ON DELETE RESTRICT
@@ -361,5 +363,74 @@ CREATE TABLE IF NOT EXISTS campaign_type_map (
 
 CREATE INDEX IF NOT EXISTS idx_campaign_type_map_type
   ON campaign_type_map (type_id);
+
+-- ----------------------------
+-- 15) FAQs
+-- ----------------------------
+CREATE TABLE IF NOT EXISTS faqs (
+  campaign_id   BIGINT NOT NULL,
+  display_order INTEGER NOT NULL,
+  question      TEXT NOT NULL,
+  answer        TEXT NOT NULL,
+  PRIMARY KEY (campaign_id, display_order),
+  CONSTRAINT fk_faqs_campaign
+    FOREIGN KEY (campaign_id) REFERENCES campaigns (campaign_id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_faqs_campaign
+  ON faqs (campaign_id);
+
+-- ----------------------------
+-- 16) Rewards
+-- ----------------------------
+CREATE TABLE IF NOT EXISTS rewards (
+  reward_id               BIGSERIAL PRIMARY KEY,
+  campaign_id             BIGINT NOT NULL,
+  title                   VARCHAR(100) NOT NULL,
+  required_amount_cents   BIGINT NOT NULL CHECK (required_amount_cents > 0),
+  description             TEXT NOT NULL,
+  limit_total             INTEGER CHECK (limit_total > 0),
+  display_order           INTEGER NOT NULL,
+  CONSTRAINT fk_rewards_campaign
+    FOREIGN KEY (campaign_id) REFERENCES campaigns (campaign_id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_rewards_campaign
+  ON rewards (campaign_id);
+
+-- ----------------------------
+-- 17) Collaborators
+-- ----------------------------
+CREATE TABLE IF NOT EXISTS collaborators (
+  collaborator_id BIGSERIAL PRIMARY KEY,
+  campaign_id     BIGINT NOT NULL,
+  email           TEXT NOT NULL,
+  status          TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'declined')),
+  time_created    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT fk_collaborators_campaign
+    FOREIGN KEY (campaign_id) REFERENCES campaigns (campaign_id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_collaborators_campaign
+  ON collaborators (campaign_id);
+
+CREATE INDEX IF NOT EXISTS idx_collaborators_email
+  ON collaborators (email);
+
+-- ----------------------------
+-- 18) Bank Details
+-- ----------------------------
+CREATE TABLE IF NOT EXISTS bank_details (
+  campaign_id     BIGINT PRIMARY KEY,
+  routing_number  VARCHAR(9) NOT NULL,
+  account_number  VARCHAR(17) NOT NULL,
+  account_type    TEXT NOT NULL CHECK (account_type IN ('individual', 'business')),
+  CONSTRAINT fk_bank_details_campaign
+    FOREIGN KEY (campaign_id) REFERENCES campaigns (campaign_id)
+    ON DELETE CASCADE
+);
 
 COMMIT;
