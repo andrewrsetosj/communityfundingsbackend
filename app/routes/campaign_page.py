@@ -46,9 +46,9 @@ async def get_campaign_page(campaign_id: int):
         faqs = await conn.fetch(
             """
             SELECT *
-            FROM campaign_faqs
+            FROM faqs
             WHERE campaign_id = $1
-            ORDER BY display_order ASC, faq_id ASC
+            ORDER BY display_order ASC
             """,
             campaign_id,
         )
@@ -58,7 +58,7 @@ async def get_campaign_page(campaign_id: int):
         rewards = await conn.fetch(
             """
             SELECT *
-            FROM campaign_rewards
+            FROM rewards
             WHERE campaign_id = $1
             ORDER BY display_order ASC, reward_id ASC
             """,
@@ -66,7 +66,25 @@ async def get_campaign_page(campaign_id: int):
         )
         rewards = [dict(r) for r in rewards]
 
-        # 5) Comments (join creators so frontend can show commenter name)
+        # 5) Photos
+        photos = await conn.fetch(
+            """
+            SELECT *
+            FROM campaign_photos
+            WHERE campaign_id = $1
+            ORDER BY is_primary DESC, photo_id ASC
+            """,
+            campaign_id,
+        )
+        photos = [dict(p) for p in photos]
+
+        for p in photos:
+            p["image_url"] = (
+                f"https://{p['s3_bucket']}.s3.us-east-2.amazonaws.com/"
+                f"{p['s3_key']}"
+            )
+
+        # 6) Comments (join creators so frontend can show commenter name)
         comments = await conn.fetch(
             """
             SELECT
@@ -75,7 +93,7 @@ async def get_campaign_page(campaign_id: int):
                 c.creator_id,
                 c.campaign_id,
                 c.time_created,
-                cr.first_name,
+                cr.name,
                 cr.last_name
             FROM comments c
             LEFT JOIN creators cr ON cr.creator_id = c.creator_id
@@ -91,5 +109,6 @@ async def get_campaign_page(campaign_id: int):
         "creator": creator,
         "faqs": faqs,
         "rewards": rewards,
+        "photos": photos,
         "comments": comments,
     }
