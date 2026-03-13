@@ -5,7 +5,7 @@ Create, edit, publish, cancel, search, filter, featured
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func as sqlfunc, or_
+from sqlalchemy import select, func as sqlfunc, or_, text
 from sqlalchemy.orm import selectinload
 from typing import Optional, List
 from decimal import Decimal
@@ -18,6 +18,7 @@ from app.models.models import Campaign, CampaignStatus, User, Donation, Donation
 from app.models.schemas import (
     CampaignCreate, CampaignUpdate, CampaignResponse, CampaignListResponse,
 )
+import db
 
 router = APIRouter(prefix="/api/campaigns", tags=["campaigns"])
 
@@ -138,6 +139,24 @@ async def get_featured(db: AsyncSession = Depends(get_db)):
     return [build_campaign_response(c) for c in result.scalars().all()]
 
 
+@router.get("/check-slug")
+async def check_slug(slug: str, db: AsyncSession = Depends(get_db)):
+    """
+    Check if a vanity slug is available.
+    Returns {"available": bool}.
+    """
+    candidate = (slug or "").strip()
+    if not candidate:
+        raise HTTPException(status_code=400, detail="Slug is required")
+
+    # DB schema uses campaigns.campaign_id + campaigns.url, not ORM's id/slug.
+    result = await db.execute(
+        text("SELECT campaign_id FROM public.campaigns WHERE url = :slug LIMIT 1"),
+        {"slug": candidate},
+    )
+    return {"available": result.first() is None}
+
+
 @router.get("/my-campaigns", response_model=List[CampaignResponse])
 async def my_campaigns(
     user: User = Depends(get_current_user),
@@ -148,6 +167,21 @@ async def my_campaigns(
         select(Campaign).where(Campaign.creator_id == user.id).order_by(Campaign.created_at.desc())
     )
     return [build_campaign_response(c, creator_name=user.name) for c in result.scalars().all()]
+
+
+# ── Finalize from create-project wizard ─────────────────────────────────────
+
+@router.post("/finalize")
+async def finalize_campaign(data: dict):
+    """
+    Submit create-project draft and write campaigns/faqs/rewards/collaborators.
+    """
+    try:
+        return await db.finalize_campaign(data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── Get by ID or slug ──────────────────────────────────────────────────────
