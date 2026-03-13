@@ -61,6 +61,94 @@ async def get_config():
     }
 
 
+@app.get("/api/stats")
+async def get_stats():
+    """
+    Return platform-wide stats: projects funded, total raised, total pledges.
+    """
+    pool = await db.get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE status = 'complete') AS projects_funded,
+                COALESCE(SUM(amount_raised_cents), 0) AS total_raised_cents,
+                COALESCE(SUM(backers), 0) AS total_pledges
+            FROM public.campaigns
+            """
+        )
+    return {
+        "projects_funded": row["projects_funded"],
+        "total_raised_cents": row["total_raised_cents"],
+        "total_pledges": row["total_pledges"],
+    }
+
+
+@app.get("/api/campaigns")
+async def list_campaigns(status: str | None = None):
+    """
+    List campaigns, optionally filtered by status.
+    Returns campaigns joined with creator name.
+    """
+    pool = await db.get_pool()
+    async with pool.acquire() as conn:
+        if status:
+            rows = await conn.fetch(
+                """
+                SELECT c.*, cr.name AS creator_name, cr.last_name AS creator_last_name
+                FROM public.campaigns c
+                LEFT JOIN public.creators cr ON c.creator_id = cr.creator_id
+                WHERE c.status = $1
+                ORDER BY c.amount_raised_cents DESC
+                """,
+                status,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT c.*, cr.name AS creator_name, cr.last_name AS creator_last_name
+                FROM public.campaigns c
+                LEFT JOIN public.creators cr ON c.creator_id = cr.creator_id
+                ORDER BY c.amount_raised_cents DESC
+                """
+            )
+
+        campaigns = []
+        for r in rows:
+            goal = r["funding_goal_cents"] or 0
+            raised = r["amount_raised_cents"] or 0
+            funding_percentage = round((raised / goal) * 100) if goal > 0 else 0
+
+            days_left = None
+            if r["end_date"]:
+                from datetime import datetime, timezone
+                diff = r["end_date"] - datetime.now(timezone.utc)
+                days_left = max(0, diff.days)
+
+            creator_name = r["creator_name"] or ""
+            if r["creator_last_name"]:
+                creator_name = f"{creator_name} {r['creator_last_name']}".strip()
+
+            campaigns.append({
+                "campaign_id": r["campaign_id"],
+                "title": r["title"],
+                "slug": r["url"] or "",
+                "status": r["status"],
+                "category": r["category"],
+                "location": r["location"],
+                "funding_goal_cents": goal,
+                "amount_raised_cents": raised,
+                "funding_percentage": funding_percentage,
+                "backers": r["backers"] or 0,
+                "days_left": days_left,
+                "creator_name": creator_name or None,
+                "description_html": r["description_html"],
+                "time_created": r["time_created"].isoformat() if r["time_created"] else None,
+            })
+
+    return {"campaigns": campaigns}
+
+
 @app.get("/api/campaigns/check-slug")
 async def check_slug(slug: str):
     """
