@@ -5,11 +5,11 @@ Create, edit, publish, cancel, search, filter, featured
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func as sqlfunc, or_, text
+from sqlalchemy import select, func as sqlfunc, or_
 from sqlalchemy.orm import selectinload
 from typing import Optional, List
 from decimal import Decimal
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 import re
 
 from app.database import get_db
@@ -17,7 +17,6 @@ from app.auth import get_current_user, get_optional_user
 from app.models.models import Campaign, CampaignStatus, User, Donation, DonationStatus
 from app.models.schemas import (
     CampaignCreate, CampaignUpdate, CampaignResponse, CampaignListResponse,
-    CampaignFinalize,
 )
 
 router = APIRouter(prefix="/api/campaigns", tags=["campaigns"])
@@ -149,87 +148,6 @@ async def my_campaigns(
         select(Campaign).where(Campaign.creator_id == user.id).order_by(Campaign.created_at.desc())
     )
     return [build_campaign_response(c, creator_name=user.name) for c in result.scalars().all()]
-
-
-# ── Finalize (create-project Submit for Review) ─────────────────────────────
-# Inserts into public.campaigns using your DDL:
-#   campaign_id bigserial, creator_id text, title, status, time_created, url,
-#   updated_at, description, category, location, funding_goal_cents, duration_days,
-#   amount_raised_cents, backers, end_date.  FK: creator_id → creators(creator_id).
-
-def _sanitize_url_slug(raw: str) -> str:
-    """Lowercase, alphanumeric and hyphens only, for campaigns.url (unique)."""
-    s = (raw or "").strip().lower()
-    s = re.sub(r"[^a-z0-9-]", "", s)
-    return s or "campaign"
-
-
-@router.post("/finalize")
-async def finalize_campaign(
-    data: CampaignFinalize,
-    db: AsyncSession = Depends(get_db),
-    user: Optional[User] = Depends(get_optional_user),
-):
-    """
-    Submit campaign draft to the database (Submit for Review).
-    Inserts into public.campaigns (your DDL: campaign_id bigserial, creator_id text,
-    title, status, time_created, url, updated_at, description, category, location,
-    funding_goal_cents, duration_days, amount_raised_cents, backers, end_date).
-    creator_id must already exist in public.creators(creator_id).
-    """
-    creator_id = (user.id if user else data.creator_id) or data.creator_id
-    if not creator_id:
-        raise HTTPException(status_code=400, detail="creator_id required or login required")
-
-    url = _sanitize_url_slug(data.vanity_slug or data.title) or _sanitize_url_slug(data.title)
-    # Ensure url is unique: if conflict, append short suffix
-    try:
-        existing = await db.execute(
-            text("SELECT 1 FROM public.campaigns WHERE url = :url LIMIT 1"),
-            {"url": url},
-        )
-        if existing.scalar() is not None:
-            url = f"{url}-{creator_id[:8]}"
-    except Exception:
-        pass  # table might not exist yet or column name differs
-
-    end_date = None
-    if data.duration_days and data.duration_days > 0:
-        end_date = datetime.now(timezone.utc) + timedelta(days=data.duration_days)
-
-    res = await db.execute(
-        text("""
-            INSERT INTO public.campaigns (
-                creator_id, title, status, time_created, url,
-                description, category, "location",
-                funding_goal_cents, duration_days, amount_raised_cents, backers, end_date
-            )
-            VALUES (
-                :creator_id, :title, :status, NOW(), :url,
-                :description, :category, :location,
-                :funding_goal_cents, :duration_days, 0, 0, :end_date
-            )
-            RETURNING campaign_id, url
-        """),
-        {
-            "creator_id": str(creator_id),
-            "title": (data.title or "").strip() or None,
-            "status": "pending_review",
-            "url": url or None,
-            "description": (data.description_html or "").strip() or None,
-            "category": (data.category or "").strip() or None,
-            "location": (data.location or "").strip() or None,
-            "funding_goal_cents": data.funding_goal_cents,
-            "duration_days": data.duration_days,
-            "end_date": end_date,
-        },
-    )
-    row = res.one()
-    campaign_id = row[0]
-    final_url = row[1]
-    # Transaction is committed when get_db() session context exits
-
-    return {"campaign_id": campaign_id, "slug": final_url}
 
 
 # ── Get by ID or slug ──────────────────────────────────────────────────────
