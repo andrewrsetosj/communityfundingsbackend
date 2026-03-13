@@ -1,0 +1,7 @@
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
+
+[project]
+name = "community-fundings-backend"
+version = "3.0.0"
