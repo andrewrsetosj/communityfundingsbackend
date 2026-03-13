@@ -60,6 +60,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./community_fundin
 
 _is_sqlite = DATABASE_URL.startswith("sqlite")
 
+# Create an async engine but DO NOT call create_all() automatically.
 engine = create_async_engine(
     DATABASE_URL,
     echo=False,

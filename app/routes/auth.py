@@ -76,7 +76,6 @@ async def get_me(user: User = Depends(get_current_user)):
         created_at=user.created_at,
     )
 
-
 @router.put("/me", response_model=UserResponse)
 async def update_me(
     data: UserUpdate,
