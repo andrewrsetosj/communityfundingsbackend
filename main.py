@@ -103,7 +103,6 @@ app.include_router(comments_router)
 app.include_router(reports_router)
 app.include_router(uploads_router)
 app.include_router(admin_router)
-app.include_router(campaign_page_router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
