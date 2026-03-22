@@ -11,7 +11,7 @@ from app.database import get_db
 from app.auth import get_current_user
 from app.models.models import User, PaymentDetail, BillingAddress, AccountType
 from app.models.schemas import (
-    UserResponse, UserPublicResponse,
+    UserResponse, UserPublicResponse, UserProfileUpdate,
     PaymentDetailCreate, PaymentDetailResponse,
     BillingAddressCreate, BillingAddressResponse,
 )
@@ -30,7 +30,46 @@ async def get_user_public(user_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="User not found")
     return UserPublicResponse(
         id=user.id, name=user.name,
-        avatar_url=user.avatar_url, bio=user.bio,
+        last_name=user.last_name, email=user.email,
+        bio=user.bio,
+        phone_number=user.phone_number,
+        address=user.address,
+        state=user.state,
+        time_zone=user.time_zone,
+        created_at=user.created_at,
+    )
+
+
+# ── Update profile ────────────────────────────────────────────────────────
+
+@router.put("/{user_id}", response_model=UserPublicResponse)
+async def update_user_profile(
+    user_id: str,
+    data: UserProfileUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update a user's profile fields. Creates the user if they don't exist."""
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        # Create the creator row on first save
+        user = User(id=user_id)
+        db.add(user)
+
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(user, field, value)
+
+    await db.flush()
+
+    return UserPublicResponse(
+        id=user.id, name=user.name,
+        last_name=user.last_name, email=user.email,
+        bio=user.bio,
+        phone_number=user.phone_number,
+        address=user.address,
+        state=user.state,
+        time_zone=user.time_zone,
         created_at=user.created_at,
     )
 

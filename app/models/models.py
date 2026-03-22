@@ -4,7 +4,7 @@ Complete schema for a GoFundMe / Kickstarter-style platform
 """
 
 from sqlalchemy import (
-    Column, String, Float, Integer, Boolean, DateTime, Text,
+    Column, String, Float, Integer, BigInteger, Boolean, DateTime, Text,
     ForeignKey, Enum, Index, Numeric, UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
@@ -79,31 +79,23 @@ class ReportStatus(str, enum.Enum):
 # ════════════════════════════════════════════════════════════════════════════
 
 class User(Base):
-    __tablename__ = "users"
+    __tablename__ = "creators"
 
-    id = Column(String(50), primary_key=True, default=generate_uuid)
-    email = Column(String(255), unique=True, nullable=False, index=True)
-    name = Column(String(255), nullable=False)
-    hashed_password = Column(String(255), nullable=False)
-    avatar_url = Column(String(500), nullable=True)
+    id = Column("creator_id", String(50), primary_key=True, default=generate_uuid)
+    email = Column(String(255), unique=True, nullable=True, index=True)
+    name = Column(String(255), nullable=True)
+    last_name = Column(String(255), nullable=True)
+    user_type = Column(Integer, default=0, server_default="0")
     bio = Column(Text, nullable=True)
-    email_verified = Column(Boolean, default=False)
-    is_admin = Column(Boolean, default=False)
-
-    # Stripe
-    stripe_customer_id = Column(String(255), unique=True, nullable=True)
-    stripe_connect_account_id = Column(String(255), unique=True, nullable=True)
-    stripe_connect_onboarded = Column(Boolean, default=False)
-
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    hashed_password = Column(String(255), nullable=True)
+    phone_number = Column(String(50), nullable=True)
+    address = Column(String(500), nullable=True)
+    state = Column(String(100), nullable=True)
+    time_zone = Column(String(50), nullable=True)
+    created_at = Column("time_creation", DateTime(timezone=True), server_default=func.now())
 
     # Relationships
-    campaigns = relationship("Campaign", back_populates="creator", lazy="selectin")
-    donations = relationship("Donation", back_populates="donor", lazy="selectin")
-    payment_details = relationship("PaymentDetail", back_populates="user", lazy="selectin")
-    billing_addresses = relationship("BillingAddress", back_populates="user", lazy="selectin")
-    comments = relationship("Comment", back_populates="user", lazy="selectin")
+    campaigns = relationship("Campaign", back_populates="creator")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -113,39 +105,28 @@ class User(Base):
 class Campaign(Base):
     __tablename__ = "campaigns"
 
-    id = Column(String(50), primary_key=True, default=generate_uuid)
+    id = Column("campaign_id", Integer, primary_key=True, autoincrement=True)
     title = Column(String(200), nullable=False)
-    slug = Column(String(220), unique=True, nullable=False, index=True)
-    short_description = Column(String(300), nullable=True)
-    description = Column(Text, nullable=False)
-    goal_amount = Column(Numeric(12, 2), nullable=False)
-    raised_amount = Column(Numeric(12, 2), default=0.00)
-    image_url = Column(String(500), nullable=True)
-    video_url = Column(String(500), nullable=True)
-    creator_id = Column(String(50), ForeignKey("users.id"), nullable=False)
-    status = Column(
-        Enum(CampaignStatus), default=CampaignStatus.DRAFT, nullable=False, index=True
-    )
-    donors_count = Column(Integer, default=0)
+    slug = Column("url", String(220), unique=True, nullable=True, index=True)
+    description = Column("description_html", Text, nullable=True)
+    goal_amount = Column("funding_goal_cents", BigInteger, nullable=True)
+    raised_amount = Column("amount_raised_cents", BigInteger, default=0)
+    creator_id = Column(String(50), ForeignKey("creators.creator_id"), nullable=True)
+    status = Column(String(50), default="draft", nullable=True, index=True)
+    donors_count = Column("backers", Integer, default=0)
     category = Column(String(100), nullable=True, index=True)
     location = Column(String(255), nullable=True)
     end_date = Column(DateTime(timezone=True), nullable=True)
-    is_featured = Column(Boolean, default=False)
+    bio = Column(Text, nullable=True)
+    duration_days = Column(Integer, nullable=True)
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    created_at = Column("time_created", DateTime(timezone=True), server_default=func.now())
 
     # Relationships
-    creator = relationship("User", back_populates="campaigns")
-    donations = relationship("Donation", back_populates="campaign", lazy="selectin")
-    updates = relationship("CampaignUpdate", back_populates="campaign", lazy="selectin",
-                           order_by="CampaignUpdate.created_at.desc()")
-    comments = relationship("Comment", back_populates="campaign", lazy="selectin",
-                            order_by="Comment.created_at.desc()")
-    payouts = relationship("Payout", back_populates="campaign", lazy="selectin")
+    creator = relationship("User", back_populates="campaigns", lazy="selectin")
 
     __table_args__ = (
-        Index("idx_campaigns_status_created", "status", "created_at"),
+        Index("idx_campaigns_status_created", "status", "time_created"),
         Index("idx_campaigns_category", "category"),
         Index("idx_campaigns_creator", "creator_id"),
     )
@@ -159,8 +140,8 @@ class Donation(Base):
     __tablename__ = "donations"
 
     id = Column(String(50), primary_key=True, default=generate_uuid)
-    campaign_id = Column(String(50), ForeignKey("campaigns.id"), nullable=False)
-    donor_id = Column(String(50), ForeignKey("users.id"), nullable=True)
+    campaign_id = Column(String(50), ForeignKey("campaigns.campaign_id"), nullable=False)
+    donor_id = Column(String(50), ForeignKey("creators.creator_id"), nullable=True)
     donor_name = Column(String(255), default="Anonymous")
     donor_email = Column(String(255), nullable=True)
     is_anonymous = Column(Boolean, default=False)
@@ -190,9 +171,9 @@ class Donation(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     # Relationships
-    campaign = relationship("Campaign", back_populates="donations")
-    donor = relationship("User", back_populates="donations")
-    refund_requests = relationship("RefundRequest", back_populates="donation", lazy="selectin")
+    campaign = relationship("Campaign")
+    donor = relationship("User")
+    refund_requests = relationship("RefundRequest", back_populates="donation")
 
     __table_args__ = (
         Index("idx_donations_campaign_status", "campaign_id", "status"),
@@ -209,7 +190,7 @@ class RefundRequest(Base):
 
     id = Column(String(50), primary_key=True, default=generate_uuid)
     donation_id = Column(String(50), ForeignKey("donations.id"), nullable=False)
-    requester_id = Column(String(50), ForeignKey("users.id"), nullable=False)
+    requester_id = Column(String(50), ForeignKey("creators.creator_id"), nullable=False)
     reason = Column(Text, nullable=False)
     amount = Column(Numeric(12, 2), nullable=True)  # null = full refund
     status = Column(Enum(RefundStatus), default=RefundStatus.REQUESTED, nullable=False)
@@ -230,8 +211,8 @@ class Payout(Base):
     __tablename__ = "payouts"
 
     id = Column(String(50), primary_key=True, default=generate_uuid)
-    campaign_id = Column(String(50), ForeignKey("campaigns.id"), nullable=False)
-    creator_id = Column(String(50), ForeignKey("users.id"), nullable=False)
+    campaign_id = Column(String(50), ForeignKey("campaigns.campaign_id"), nullable=False)
+    creator_id = Column(String(50), ForeignKey("creators.creator_id"), nullable=False)
     amount = Column(Numeric(12, 2), nullable=False)
     currency = Column(String(3), default="usd")
     status = Column(Enum(PayoutStatus), default=PayoutStatus.PENDING, nullable=False)
@@ -241,7 +222,7 @@ class Payout(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     completed_at = Column(DateTime(timezone=True), nullable=True)
 
-    campaign = relationship("Campaign", back_populates="payouts")
+    campaign = relationship("Campaign")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -252,15 +233,15 @@ class CampaignUpdate(Base):
     __tablename__ = "campaign_updates"
 
     id = Column(String(50), primary_key=True, default=generate_uuid)
-    campaign_id = Column(String(50), ForeignKey("campaigns.id"), nullable=False)
-    author_id = Column(String(50), ForeignKey("users.id"), nullable=False)
+    campaign_id = Column(String(50), ForeignKey("campaigns.campaign_id"), nullable=False)
+    author_id = Column(String(50), ForeignKey("creators.creator_id"), nullable=False)
     title = Column(String(200), nullable=False)
     content = Column(Text, nullable=False)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    campaign = relationship("Campaign", back_populates="updates")
+    campaign = relationship("Campaign")
 
     __table_args__ = (
         Index("idx_updates_campaign", "campaign_id"),
@@ -275,15 +256,15 @@ class Comment(Base):
     __tablename__ = "comments"
 
     id = Column(String(50), primary_key=True, default=generate_uuid)
-    campaign_id = Column(String(50), ForeignKey("campaigns.id"), nullable=False)
-    user_id = Column(String(50), ForeignKey("users.id"), nullable=False)
+    campaign_id = Column(String(50), ForeignKey("campaigns.campaign_id"), nullable=False)
+    user_id = Column(String(50), ForeignKey("creators.creator_id"), nullable=False)
     content = Column(Text, nullable=False)
     is_hidden = Column(Boolean, default=False)  # admin can hide
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    campaign = relationship("Campaign", back_populates="comments")
-    user = relationship("User", back_populates="comments")
+    campaign = relationship("Campaign")
+    user = relationship("User")
 
     __table_args__ = (
         Index("idx_comments_campaign", "campaign_id"),
@@ -298,8 +279,8 @@ class Report(Base):
     __tablename__ = "reports"
 
     id = Column(String(50), primary_key=True, default=generate_uuid)
-    reporter_id = Column(String(50), ForeignKey("users.id"), nullable=False)
-    campaign_id = Column(String(50), ForeignKey("campaigns.id"), nullable=True)
+    reporter_id = Column(String(50), ForeignKey("creators.creator_id"), nullable=False)
+    campaign_id = Column(String(50), ForeignKey("campaigns.campaign_id"), nullable=True)
     comment_id = Column(String(50), ForeignKey("comments.id"), nullable=True)
     reason = Column(Enum(ReportReason), nullable=False)
     details = Column(Text, nullable=True)
@@ -318,7 +299,7 @@ class PaymentDetail(Base):
     __tablename__ = "payment_details"
 
     id = Column(String(50), primary_key=True, default=generate_uuid)
-    user_id = Column(String(50), ForeignKey("users.id"), nullable=False)
+    user_id = Column(String(50), ForeignKey("creators.creator_id"), nullable=False)
     account_type = Column(Enum(AccountType), default=AccountType.INDIVIDUAL)
     account_holder_name = Column(String(255), nullable=False)
     routing_number_last4 = Column(String(4), nullable=True)
@@ -330,7 +311,7 @@ class PaymentDetail(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    user = relationship("User", back_populates="payment_details")
+    user = relationship("User")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -341,7 +322,7 @@ class BillingAddress(Base):
     __tablename__ = "billing_addresses"
 
     id = Column(String(50), primary_key=True, default=generate_uuid)
-    user_id = Column(String(50), ForeignKey("users.id"), nullable=False)
+    user_id = Column(String(50), ForeignKey("creators.creator_id"), nullable=False)
     full_name = Column(String(255), nullable=False)
     address_line1 = Column(String(255), nullable=False)
     address_line2 = Column(String(255), nullable=True)
@@ -354,7 +335,7 @@ class BillingAddress(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    user = relationship("User", back_populates="billing_addresses")
+    user = relationship("User")
 
 
 # ════════════════════════════════════════════════════════════════════════════
