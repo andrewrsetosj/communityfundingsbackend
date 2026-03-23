@@ -2,8 +2,7 @@ from fastapi import APIRouter, HTTPException
 from app.db import get_pool
 
 router = APIRouter(prefix="/api/campaign-page", tags=["campaign-page"])
-
-
+        
 @router.get("/{campaign_id}")
 async def get_campaign_page(campaign_id: int):
     """
