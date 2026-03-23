@@ -9,7 +9,7 @@ import os
 import sys
 import traceback
 from contextlib import asynccontextmanager
-
+from app.routes.campaign_page import router as campaign_page_router
 from fastapi import FastAPI, Header, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -48,24 +48,18 @@ from app.routes.admin import router as admin_router
 async def lifespan(app: FastAPI):
     print("🚀 Starting Community Fundings API...")
 
-    from app.database import DATABASE_URL as DB_URL
-    if DB_URL.startswith("sqlite"):
-        # Create SQLite tables via SQLAlchemy
-        from app.database import engine, Base
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        print("✅ SQLite tables created")
-    else:
-        await asyncpg_init_db()
-        print("✅ asyncpg creators table ready")
+    # Only initialize asyncpg schema (creators table)
+    await asyncpg_init_db()
+    print("✅ asyncpg creators table ready")
 
     yield
 
+    # Shutdown cleanup
     try:
         await close_pool()
         print("👋 AsyncPG pool closed")
-    except Exception:
-        pass
+    except Exception as e:
+        print("WARN: Error closing pool:", e)
 
 
 app = FastAPI(
@@ -82,7 +76,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # tighten in production
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -103,6 +97,11 @@ app.include_router(comments_router)
 app.include_router(reports_router)
 app.include_router(uploads_router)
 app.include_router(admin_router)
+app.include_router(campaign_page_router)
+
+print("APP ROUTES:")
+for r in app.routes:
+    print(getattr(r, "path", r))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
