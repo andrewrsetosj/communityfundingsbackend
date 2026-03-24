@@ -79,7 +79,7 @@ async def init_db() -> None:
                 id serial PRIMARY KEY,
                 creator_id text UNIQUE NOT NULL,
                 user_type text,
-                first_name text,
+                name text,
                 last_name text,
                 email text,
                 time_creation timestamptz DEFAULT now(),
@@ -87,12 +87,24 @@ async def init_db() -> None:
             );
             """
         )
+        # Add profile columns if they don't exist yet
+        for col, col_type in [
+            ("hashed_password", "text"),
+            ("bio", "text"),
+            ("phone_number", "text"),
+            ("address", "text"),
+            ("state", "text"),
+            ("time_zone", "text"),
+        ]:
+            await conn.execute(f"""
+                ALTER TABLE creators ADD COLUMN IF NOT EXISTS {col} {col_type};
+            """)
     print("✅ asyncpg creators table ensured")
 
 
 async def upsert_creator(
     creator_id: str,
-    first_name: Optional[str] = None,
+    name: Optional[str] = None,
     last_name: Optional[str] = None,
     email: Optional[str] = None,
     time_creation: Optional[datetime.datetime] = None,
@@ -111,33 +123,33 @@ async def upsert_creator(
             if time_creation is None:
                 row = await conn.fetchrow(
                     """
-                    INSERT INTO creators (creator_id, first_name, last_name, email, time_creation)
+                    INSERT INTO creators (creator_id, name, last_name, email, time_creation)
                     VALUES ($1, $2, $3, $4, NOW())
                     ON CONFLICT (creator_id) DO UPDATE SET
-                      first_name = COALESCE(EXCLUDED.first_name, creators.first_name),
+                      name = COALESCE(EXCLUDED.name, creators.name),
                       last_name  = COALESCE(EXCLUDED.last_name, creators.last_name),
                       email      = COALESCE(EXCLUDED.email, creators.email)
                     RETURNING *;
                     """,
                     creator_id,
-                    first_name,
+                    name,
                     last_name,
                     email,
                 )
             else:
                 row = await conn.fetchrow(
                     """
-                    INSERT INTO creators (creator_id, first_name, last_name, email, time_creation)
+                    INSERT INTO creators (creator_id, name, last_name, email, time_creation)
                     VALUES ($1, $2, $3, $4, $5)
                     ON CONFLICT (creator_id) DO UPDATE SET
-                      first_name = COALESCE(EXCLUDED.first_name, creators.first_name),
+                      name = COALESCE(EXCLUDED.name, creators.name),
                       last_name  = COALESCE(EXCLUDED.last_name, creators.last_name),
                       email      = COALESCE(EXCLUDED.email, creators.email),
                       time_creation = COALESCE(EXCLUDED.time_creation, creators.time_creation)
                     RETURNING *;
                     """,
                     creator_id,
-                    first_name,
+                    name,
                     last_name,
                     email,
                     time_creation,

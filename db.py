@@ -147,6 +147,29 @@ async def list_campaigns(
     return {"campaigns": campaigns, "total": int(total or 0), "per_page": per_page}
 
 
+async def get_platform_stats() -> dict[str, Any]:
+    """Get real-time platform stats: total funded campaigns, total raised, total donations."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        funded_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM public.campaigns WHERE status = 'funded'"
+        ) or 0
+
+        total_raised = await conn.fetchval(
+            "SELECT COALESCE(SUM(amount_raised_cents), 0) FROM public.campaigns"
+        ) or 0
+
+        total_donations = await conn.fetchval(
+            "SELECT COALESCE(SUM(backers), 0) FROM public.campaigns"
+        ) or 0
+
+    return {
+        "projects_funded": int(funded_count),
+        "total_raised_cents": int(total_raised),
+        "total_pledges": int(total_donations),
+    }
+
+
 async def _ensure_creator_exists(conn: asyncpg.Connection, creator_id: str, bio: str | None) -> None:
     exists = await conn.fetchrow(
         "SELECT 1 FROM public.creators WHERE creator_id = $1 LIMIT 1",
@@ -213,16 +236,11 @@ async def finalize_campaign(data: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("title is required")
 
     url = _slug(data.get("vanity_slug") or title) or _slug(title)
+    existing_campaign_id = data.get("campaign_id")
+
     async with pool.acquire() as conn:
         async with conn.transaction():
             await _ensure_creator_exists(conn, creator_id, data.get("bio"))
-
-            row = await conn.fetchrow(
-                "SELECT 1 FROM public.campaigns WHERE url = $1 LIMIT 1",
-                url,
-            )
-            if row:
-                url = f"{url}-{creator_id[:8]}"
 
             duration_days = data.get("duration_days")
             end_date = None
@@ -239,33 +257,56 @@ async def finalize_campaign(data: dict[str, Any]) -> dict[str, Any]:
             duration_days_val = int(duration_days) if duration_days else None
             bio = (data.get("bio") or "").strip() or None
 
-            row = await conn.fetchrow(
-                """
-                INSERT INTO public.campaigns (
-                    creator_id, title, status, time_created, url,
-                    description_html, category, "location",
-                    funding_goal_cents, duration_days, amount_raised_cents, backers, end_date, bio
+            if existing_campaign_id:
+                # Update the existing draft → pending_review
+                row = await conn.fetchrow(
+                    """
+                    UPDATE public.campaigns
+                    SET title = $1, status = 'pending_review', url = $2,
+                        description_html = $3, category = $4, "location" = $5,
+                        funding_goal_cents = $6, duration_days = $7, end_date = $8, bio = $9
+                    WHERE campaign_id = $10 AND creator_id = $11
+                    RETURNING campaign_id, url
+                    """,
+                    title, url, description, category, location,
+                    funding_goal_cents, duration_days_val, end_date, bio,
+                    int(existing_campaign_id), creator_id,
                 )
-                VALUES (
-                    $1, $2, $3, NOW(), $4,
-                    $5, $6, $7,
-                    $8, $9, 0, 0, $10, $11
+                if not row:
+                    raise ValueError("Campaign not found or not owned by this user")
+                campaign_id = int(row["campaign_id"])
+            else:
+                # Fresh insert
+                slug_row = await conn.fetchrow(
+                    "SELECT 1 FROM public.campaigns WHERE url = $1 LIMIT 1", url,
                 )
-                RETURNING campaign_id, url
-                """,
-                creator_id,
-                title or None,
-                "pending_review",
-                url or None,
-                description,
-                category,
-                location,
-                funding_goal_cents,
-                duration_days_val,
-                end_date,
-                bio,
-            )
-            campaign_id = int(row["campaign_id"])
+                if slug_row:
+                    url = f"{url}-{creator_id[:8]}"
+
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO public.campaigns (
+                        creator_id, title, status, time_created, url,
+                        description_html, category, "location",
+                        funding_goal_cents, duration_days, amount_raised_cents, backers, end_date, bio
+                    )
+                    VALUES (
+                        $1, $2, $3, NOW(), $4,
+                        $5, $6, $7,
+                        $8, $9, 0, 0, $10, $11
+                    )
+                    RETURNING campaign_id, url
+                    """,
+                    creator_id, title or None, "pending_review", url or None,
+                    description, category, location,
+                    funding_goal_cents, duration_days_val, end_date, bio,
+                )
+                campaign_id = int(row["campaign_id"])
+
+            # Delete + re-insert related rows
+            await conn.execute("DELETE FROM public.faqs WHERE campaign_id = $1", campaign_id)
+            await conn.execute("DELETE FROM public.rewards WHERE campaign_id = $1", campaign_id)
+            await conn.execute("DELETE FROM public.collaborators WHERE campaign_id = $1", campaign_id)
 
             # FAQs
             faqs = data.get("faqs") or []
@@ -279,10 +320,7 @@ async def finalize_campaign(data: dict[str, Any]) -> dict[str, Any]:
                 faq_rows.append((campaign_id, order, question, answer))
             if faq_rows:
                 await conn.executemany(
-                    """
-                    INSERT INTO public.faqs (campaign_id, display_order, question, answer)
-                    VALUES ($1, $2, $3, $4)
-                    """,
+                    "INSERT INTO public.faqs (campaign_id, display_order, question, answer) VALUES ($1, $2, $3, $4)",
                     faq_rows,
                 )
 
@@ -304,8 +342,7 @@ async def finalize_campaign(data: dict[str, Any]) -> dict[str, Any]:
                     """
                     INSERT INTO public.rewards (
                         campaign_id, title, required_amount_cents, description, limit_total, display_order
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6)
+                    ) VALUES ($1, $2, $3, $4, $5, $6)
                     """,
                     reward_rows,
                 )
@@ -322,11 +359,235 @@ async def finalize_campaign(data: dict[str, Any]) -> dict[str, Any]:
                 collaborator_rows.append((campaign_id, email, "pending"))
             if collaborator_rows:
                 await conn.executemany(
-                    """
-                    INSERT INTO public.collaborators (campaign_id, email, status)
-                    VALUES ($1, $2, $3)
-                    """,
+                    "INSERT INTO public.collaborators (campaign_id, email, status) VALUES ($1, $2, $3)",
                     collaborator_rows,
                 )
 
     return {"campaign_id": row["campaign_id"], "slug": row["url"] or url}
+
+
+async def upsert_draft_campaign(data: dict[str, Any]) -> dict[str, Any]:
+    """Create or update a draft campaign and its related tables (faqs, rewards, collaborators)."""
+    pool = await get_pool()
+    creator_id = (data.get("creator_id") or "").strip()
+    if not creator_id:
+        raise ValueError("creator_id is required")
+
+    title = (data.get("title") or "").strip() or "Untitled Draft"
+    url = _slug(data.get("vanity_slug") or title) or _slug(title)
+
+    duration_days = data.get("duration_days")
+    end_date = None
+    if duration_days and int(duration_days) > 0:
+        end_date = datetime.now(timezone.utc) + timedelta(days=int(duration_days))
+
+    funding_goal_cents = int(data.get("funding_goal_cents") or 0)
+    if funding_goal_cents < 0:
+        funding_goal_cents = 0
+
+    description = (data.get("description_html") or "").strip() or None
+    category = (data.get("category") or "").strip() or None
+    location = (data.get("location") or "").strip() or None
+    duration_days_val = int(duration_days) if duration_days else None
+    bio = (data.get("bio") or "").strip() or None
+    campaign_id = data.get("campaign_id")
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await _ensure_creator_exists(conn, creator_id, bio)
+
+            if campaign_id:
+                # UPDATE existing draft
+                row = await conn.fetchrow(
+                    """
+                    UPDATE public.campaigns
+                    SET title = $1, url = $2, description_html = $3, category = $4,
+                        "location" = $5, funding_goal_cents = $6, duration_days = $7,
+                        end_date = $8, bio = $9
+                    WHERE campaign_id = $10 AND creator_id = $11 AND status = 'draft'
+                    RETURNING campaign_id, url
+                    """,
+                    title, url, description, category, location,
+                    funding_goal_cents, duration_days_val, end_date, bio,
+                    int(campaign_id), creator_id,
+                )
+                if not row:
+                    raise ValueError("Draft not found or not owned by this user")
+                campaign_id = int(row["campaign_id"])
+            else:
+                # Ensure unique slug
+                existing = await conn.fetchrow(
+                    "SELECT 1 FROM public.campaigns WHERE url = $1 LIMIT 1", url,
+                )
+                if existing:
+                    url = f"{url}-{creator_id[:8]}"
+
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO public.campaigns (
+                        creator_id, title, status, time_created, url,
+                        description_html, category, "location",
+                        funding_goal_cents, duration_days, amount_raised_cents, backers, end_date, bio
+                    )
+                    VALUES (
+                        $1, $2, 'draft', NOW(), $3,
+                        $4, $5, $6,
+                        $7, $8, 0, 0, $9, $10
+                    )
+                    RETURNING campaign_id, url
+                    """,
+                    creator_id, title, url, description, category, location,
+                    funding_goal_cents, duration_days_val, end_date, bio,
+                )
+                campaign_id = int(row["campaign_id"])
+
+            # Delete + re-insert related rows
+            await conn.execute("DELETE FROM public.faqs WHERE campaign_id = $1", campaign_id)
+            await conn.execute("DELETE FROM public.rewards WHERE campaign_id = $1", campaign_id)
+            await conn.execute("DELETE FROM public.collaborators WHERE campaign_id = $1", campaign_id)
+
+            # FAQs
+            faqs = data.get("faqs") or []
+            faq_rows: list[tuple[int, int, str, str]] = []
+            for idx, f in enumerate(faqs):
+                question = str((f or {}).get("question") or "").strip()
+                answer = str((f or {}).get("answer") or "").strip()
+                if not question or not answer:
+                    continue
+                order = int((f or {}).get("display_order", idx))
+                faq_rows.append((campaign_id, order, question, answer))
+            if faq_rows:
+                await conn.executemany(
+                    "INSERT INTO public.faqs (campaign_id, display_order, question, answer) VALUES ($1, $2, $3, $4)",
+                    faq_rows,
+                )
+
+            # Rewards
+            rewards = data.get("rewards") or []
+            reward_rows: list[tuple[int, str, int, str, int | None, int]] = []
+            for idx, r in enumerate(rewards):
+                title_val = str((r or {}).get("title") or "").strip()
+                desc_val = str((r or {}).get("description") or "").strip()
+                amount = int((r or {}).get("required_amount_cents") or 0)
+                if not title_val or amount <= 0:
+                    continue
+                limit_raw = (r or {}).get("limit_total")
+                limit_total = int(limit_raw) if limit_raw not in (None, "", 0) else None
+                order = int((r or {}).get("display_order", idx))
+                reward_rows.append((campaign_id, title_val[:100], amount, desc_val, limit_total, order))
+            if reward_rows:
+                await conn.executemany(
+                    """
+                    INSERT INTO public.rewards (
+                        campaign_id, title, required_amount_cents, description, limit_total, display_order
+                    ) VALUES ($1, $2, $3, $4, $5, $6)
+                    """,
+                    reward_rows,
+                )
+
+            # Collaborators
+            co_creators = data.get("co_creators") or []
+            seen_emails: set[str] = set()
+            collaborator_rows: list[tuple[int, str, str]] = []
+            for c in co_creators:
+                email = str((c or {}).get("email") or "").strip().lower()
+                if not email or email in seen_emails:
+                    continue
+                seen_emails.add(email)
+                collaborator_rows.append((campaign_id, email, "pending"))
+            if collaborator_rows:
+                await conn.executemany(
+                    "INSERT INTO public.collaborators (campaign_id, email, status) VALUES ($1, $2, $3)",
+                    collaborator_rows,
+                )
+
+    return {"campaign_id": campaign_id, "slug": row["url"] or url}
+
+
+async def get_draft_campaign(campaign_id: int, creator_id: str) -> dict[str, Any] | None:
+    """Fetch a single draft campaign with its related data, shaped for the frontend store."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        campaign = await conn.fetchrow(
+            """
+            SELECT campaign_id, title, url, description_html, category, "location",
+                   funding_goal_cents, duration_days, bio, status, time_created
+            FROM public.campaigns
+            WHERE campaign_id = $1 AND creator_id = $2 AND status = 'draft'
+            """,
+            campaign_id, creator_id,
+        )
+        if not campaign:
+            return None
+
+        faqs = await conn.fetch(
+            "SELECT question, answer, display_order FROM public.faqs WHERE campaign_id = $1 ORDER BY display_order",
+            campaign_id,
+        )
+        rewards = await conn.fetch(
+            """
+            SELECT title, required_amount_cents, description, limit_total, display_order
+            FROM public.rewards WHERE campaign_id = $1 ORDER BY display_order
+            """,
+            campaign_id,
+        )
+        collaborators = await conn.fetch(
+            "SELECT email FROM public.collaborators WHERE campaign_id = $1",
+            campaign_id,
+        )
+
+    return {
+        "campaign_id": campaign["campaign_id"],
+        "title": campaign["title"] or "",
+        "category": campaign["category"] or "",
+        "location": campaign["location"] or "",
+        "funding_goal_cents": int(campaign["funding_goal_cents"] or 0),
+        "duration_days": campaign["duration_days"] or 0,
+        "description_html": campaign["description_html"] or "",
+        "bio": campaign["bio"] or "",
+        "vanity_slug": campaign["url"] or "",
+        "rewards": [
+            {
+                "title": r["title"] or "",
+                "required_amount_cents": int(r["required_amount_cents"] or 0),
+                "description": r["description"] or "",
+                "limit_total": r["limit_total"],
+                "display_order": r["display_order"] or 0,
+            }
+            for r in rewards
+        ],
+        "faqs": [
+            {
+                "question": f["question"] or "",
+                "answer": f["answer"] or "",
+                "display_order": f["display_order"] or 0,
+            }
+            for f in faqs
+        ],
+        "co_creators": [{"email": c["email"]} for c in collaborators],
+    }
+
+
+async def list_draft_campaigns(creator_id: str) -> list[dict[str, Any]]:
+    """List all draft campaigns for a given creator."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT campaign_id, title, category, time_created, url
+            FROM public.campaigns
+            WHERE creator_id = $1 AND status = 'draft'
+            ORDER BY time_created DESC
+            """,
+            creator_id,
+        )
+    return [
+        {
+            "campaign_id": r["campaign_id"],
+            "title": r["title"] or "Untitled Draft",
+            "category": r["category"] or "",
+            "created_at": r["time_created"].isoformat() if r["time_created"] else None,
+            "slug": r["url"] or "",
+        }
+        for r in rows
+    ]

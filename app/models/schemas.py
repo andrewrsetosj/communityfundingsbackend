@@ -1,5 +1,6 @@
 """
 Pydantic schemas — request/response validation for all endpoints
+Aligned with actual PostgreSQL database schema.
 """
 
 from pydantic import BaseModel, EmailStr, Field
@@ -35,7 +36,7 @@ class PasswordChangeRequest(BaseModel):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Users
+# Users (DB table: creators)
 # ════════════════════════════════════════════════════════════════════════════
 
 class UserCreate(BaseModel):
@@ -46,19 +47,22 @@ class UserCreate(BaseModel):
 
 class UserUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
+    last_name: Optional[str] = None
     bio: Optional[str] = None
-    avatar_url: Optional[str] = None
 
 
 class UserResponse(BaseModel):
     id: str
-    email: str
-    name: str
-    avatar_url: Optional[str] = None
+    email: Optional[str] = None
+    name: Optional[str] = None
+    last_name: Optional[str] = None
+    user_type: Optional[int] = None
     bio: Optional[str] = None
-    email_verified: bool
-    stripe_connect_onboarded: bool = False
-    created_at: datetime
+    phone_number: Optional[str] = None
+    address: Optional[str] = None
+    state: Optional[str] = None
+    time_zone: Optional[str] = None
+    created_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 
@@ -66,62 +70,74 @@ class UserResponse(BaseModel):
 class UserPublicResponse(BaseModel):
     """Public-facing user info (no email)"""
     id: str
-    name: str
-    avatar_url: Optional[str] = None
+    name: Optional[str] = None
+    last_name: Optional[str] = None
+    email: Optional[str] = None
     bio: Optional[str] = None
-    created_at: datetime
+    phone_number: Optional[str] = None
+    address: Optional[str] = None
+    state: Optional[str] = None
+    time_zone: Optional[str] = None
+    created_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 
 
+class UserProfileUpdate(BaseModel):
+    """Fields the user can update on their profile."""
+    name: Optional[str] = None
+    last_name: Optional[str] = None
+    bio: Optional[str] = None
+    phone_number: Optional[str] = None
+    address: Optional[str] = None
+    state: Optional[str] = None
+    time_zone: Optional[str] = None
+
+
 # ════════════════════════════════════════════════════════════════════════════
-# Campaigns
+# Campaigns (DB table: campaigns)
 # ════════════════════════════════════════════════════════════════════════════
 
 class CampaignCreate(BaseModel):
-    title: str = Field(..., min_length=5, max_length=200)
-    short_description: Optional[str] = Field(None, max_length=300)
-    description: str = Field(..., min_length=20)
-    goal_amount: float = Field(..., gt=0)
-    image_url: Optional[str] = None
-    video_url: Optional[str] = None
+    title: str = Field(..., min_length=5, max_length=100)
+    description: Optional[str] = None  # maps to description_html
+    goal_amount: int = Field(..., gt=0)  # funding_goal_cents
     category: Optional[str] = None
     location: Optional[str] = None
-    end_date: str  # ISO format
+    end_date: Optional[str] = None  # ISO format
+    bio: Optional[str] = None
+    duration_days: Optional[int] = None
 
 
 class CampaignUpdate(BaseModel):
-    title: Optional[str] = Field(None, min_length=5, max_length=200)
-    short_description: Optional[str] = Field(None, max_length=300)
-    description: Optional[str] = Field(None, min_length=20)
-    image_url: Optional[str] = None
-    video_url: Optional[str] = None
+    title: Optional[str] = Field(None, min_length=5, max_length=100)
+    description: Optional[str] = None
     category: Optional[str] = None
     location: Optional[str] = None
     end_date: Optional[str] = None
+    bio: Optional[str] = None
+    duration_days: Optional[int] = None
 
 
 class CampaignResponse(BaseModel):
-    id: str
+    id: int  # campaign_id (bigserial)
     title: str
-    slug: str
-    short_description: Optional[str] = None
-    description: str
-    goal_amount: float
-    raised_amount: float
-    image_url: Optional[str] = None
-    video_url: Optional[str] = None
-    creator_id: str
-    creator_name: Optional[str] = None
-    status: str
-    donors_count: int
+    slug: Optional[str] = None  # url
+    description: Optional[str] = None  # description_html
+    goal_amount: float  # funding_goal_cents
+    raised_amount: float = 0  # amount_raised_cents
+    creator_id: Optional[str] = None
+    creator_name: Optional[str] = None  # computed from creators join
+    status: Optional[str] = None
+    donors_count: int = 0  # backers
     category: Optional[str] = None
     location: Optional[str] = None
     end_date: Optional[datetime] = None
-    is_featured: bool = False
-    funding_percentage: float
-    days_left: Optional[int] = None
-    created_at: datetime
+    bio: Optional[str] = None
+    duration_days: Optional[int] = None
+    funding_percentage: float = 0.0  # computed
+    days_left: Optional[int] = None  # computed
+    created_at: Optional[datetime] = None  # time_created
 
     model_config = {"from_attributes": True}
 
@@ -134,11 +150,11 @@ class CampaignListResponse(BaseModel):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Donations
+# Donations (DB table: donations)
 # ════════════════════════════════════════════════════════════════════════════
 
 class CheckoutSessionCreate(BaseModel):
-    campaign_id: str
+    campaign_id: int
     amount: float = Field(..., gt=0)
     donor_name: Optional[str] = "Anonymous"
     donor_email: Optional[EmailStr] = None
@@ -149,7 +165,7 @@ class CheckoutSessionCreate(BaseModel):
 
 
 class PaymentIntentCreate(BaseModel):
-    campaign_id: str
+    campaign_id: int
     amount: float = Field(..., gt=0)
     donor_email: Optional[EmailStr] = None
     donor_name: Optional[str] = "Anonymous"
@@ -158,22 +174,24 @@ class PaymentIntentCreate(BaseModel):
 
 
 class DonationResponse(BaseModel):
-    id: str
-    campaign_id: str
+    id: int  # donation_id
+    campaign_id: int
+    donor_creator_id: Optional[str] = None
+    amount: int = 0
+    status: Optional[str] = None
+    created_at: Optional[datetime] = None  # time_created
+    # Stripe fields (not in DB yet, kept for future use)
     campaign_title: Optional[str] = None
     donor_name: Optional[str] = None
     donor_email: Optional[str] = None
     is_anonymous: bool = False
     message: Optional[str] = None
-    amount: float
     platform_fee: Optional[float] = None
     processing_fee: Optional[float] = None
     net_amount: Optional[float] = None
-    currency: str
-    status: str
+    currency: Optional[str] = None
     stripe_payment_intent_id: Optional[str] = None
     refund_amount: Optional[float] = None
-    created_at: datetime
 
     model_config = {"from_attributes": True}
 
@@ -184,47 +202,49 @@ class DonationListResponse(BaseModel):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Refunds
+# Refunds (DB table: refunds)
 # ════════════════════════════════════════════════════════════════════════════
 
 class RefundRequestCreate(BaseModel):
-    donation_id: str
-    reason: str = Field(..., min_length=10)
-    amount: Optional[float] = None  # null = full refund
+    donation_id: int
+    reason: Optional[str] = None
+    amount: Optional[int] = None  # null = full refund
 
 
 class RefundRequestResponse(BaseModel):
-    id: str
-    donation_id: str
-    reason: str
-    amount: Optional[float] = None
-    status: str
-    admin_notes: Optional[str] = None
-    created_at: datetime
-    resolved_at: Optional[datetime] = None
+    id: int  # refund_id
+    donation_id: int
+    payment_id: Optional[int] = None
+    amount: Optional[int] = None
+    status: Optional[str] = None
+    time_initiated: Optional[datetime] = None
+    time_paid: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Payouts (Stripe Connect transfers to creators)
+# Payouts (DB table: payouts)
 # ════════════════════════════════════════════════════════════════════════════
 
 class PayoutResponse(BaseModel):
-    id: str
-    campaign_id: str
-    amount: float
-    currency: str
-    status: str
+    id: int  # payout_id
+    campaign_id: int
+    payee_creator_id: Optional[str] = None
+    amount: int = 0
+    time_initiated: Optional[datetime] = None
+    time_paid: Optional[datetime] = None
+    # Stripe fields (not in DB yet, kept for future use)
+    currency: Optional[str] = None
+    status: Optional[str] = None
     stripe_transfer_id: Optional[str] = None
-    created_at: datetime
-    completed_at: Optional[datetime] = None
+    stripe_payout_id: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Campaign Updates
+# Campaign Updates (not in DB diagram — kept for future use)
 # ════════════════════════════════════════════════════════════════════════════
 
 class CampaignUpdateCreate(BaseModel):
@@ -233,18 +253,18 @@ class CampaignUpdateCreate(BaseModel):
 
 
 class CampaignUpdateResponse(BaseModel):
-    id: str
-    campaign_id: str
-    author_id: str
-    title: str
-    content: str
-    created_at: datetime
+    id: Optional[str] = None
+    campaign_id: Optional[str] = None
+    author_id: Optional[str] = None
+    title: Optional[str] = None
+    content: Optional[str] = None
+    created_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Comments
+# Comments (DB table: comments)
 # ════════════════════════════════════════════════════════════════════════════
 
 class CommentCreate(BaseModel):
@@ -252,41 +272,218 @@ class CommentCreate(BaseModel):
 
 
 class CommentResponse(BaseModel):
-    id: str
-    campaign_id: str
-    user_id: str
+    id: int  # comment_id
+    campaign_id: int
+    creator_id: Optional[str] = None
+    comment_text: Optional[str] = None
+    created_at: Optional[datetime] = None  # time_created
+    # Computed fields (not in DB)
     user_name: Optional[str] = None
     user_avatar: Optional[str] = None
-    content: str
-    created_at: datetime
 
     model_config = {"from_attributes": True}
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Reports
+# Reports (DB table: reports)
 # ════════════════════════════════════════════════════════════════════════════
 
 class ReportCreate(BaseModel):
-    campaign_id: Optional[str] = None
-    comment_id: Optional[str] = None
-    reason: str  # fraud, inappropriate, spam, misleading, other
-    details: Optional[str] = None
+    campaign_id: int
+    strength_id: Optional[int] = None
 
 
 class ReportResponse(BaseModel):
-    id: str
-    campaign_id: Optional[str] = None
-    comment_id: Optional[str] = None
-    reason: str
-    status: str
-    created_at: datetime
+    id: int  # report_id
+    reporter_id: str
+    campaign_id: Optional[int] = None
+    strength_id: Optional[int] = None
+    created_at: Optional[datetime] = None  # time_created
 
     model_config = {"from_attributes": True}
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Payment Details
+# Payments (DB table: payments)
+# ════════════════════════════════════════════════════════════════════════════
+
+class PaymentResponse(BaseModel):
+    id: int  # payment_id
+    donation_id: int
+    processor: Optional[str] = None
+    status: Optional[str] = None
+    time_captured: Optional[datetime] = None
+    time_settled: Optional[datetime] = None
+    time_created: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Fees (DB table: fees)
+# ════════════════════════════════════════════════════════════════════════════
+
+class FeeResponse(BaseModel):
+    id: int  # fee_id
+    campaign_id: int
+    donation_id: int
+    amount: int = 0
+    time_created: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Bank Details (DB table: bank_details)
+# ════════════════════════════════════════════════════════════════════════════
+
+class BankDetailsCreate(BaseModel):
+    campaign_id: int
+    routing_number: str
+    account_number: str
+    account_type: str
+
+
+class BankDetailsResponse(BaseModel):
+    campaign_id: int
+    routing_number: Optional[str] = None
+    account_number: Optional[str] = None
+    account_type: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Collaborators (DB table: collaborators)
+# ════════════════════════════════════════════════════════════════════════════
+
+class CollaboratorCreate(BaseModel):
+    campaign_id: int
+    email: str
+
+
+class CollaboratorResponse(BaseModel):
+    id: int  # collaborator_id
+    campaign_id: int
+    email: Optional[str] = None
+    status: Optional[str] = None
+    time_created: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# FAQs (DB table: faqs)
+# ════════════════════════════════════════════════════════════════════════════
+
+class FaqCreate(BaseModel):
+    campaign_id: int
+    display_order: int = 0
+    question: str
+    answer: str
+
+
+class FaqResponse(BaseModel):
+    campaign_id: int
+    display_order: int = 0
+    question: Optional[str] = None
+    answer: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Rewards (DB table: rewards)
+# ════════════════════════════════════════════════════════════════════════════
+
+class RewardCreate(BaseModel):
+    campaign_id: int
+    title: str
+    required_amount_cents: int = 0
+    description: Optional[str] = None
+    limit_total: Optional[int] = None
+    display_order: int = 0
+
+
+class RewardResponse(BaseModel):
+    id: int  # reward_id
+    campaign_id: int
+    title: Optional[str] = None
+    required_amount_cents: int = 0
+    description: Optional[str] = None
+    limit_total: Optional[int] = None
+    display_order: int = 0
+
+    model_config = {"from_attributes": True}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Saved Campaigns (DB table: saved_campaigns)
+# ════════════════════════════════════════════════════════════════════════════
+
+class SavedCampaignCreate(BaseModel):
+    creator_id: str
+    campaign_id: int
+    engagement_type: int = 0
+
+
+class SavedCampaignResponse(BaseModel):
+    creator_id: str
+    campaign_id: int
+    engagement_type: int = 0
+    time_created: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Campaign Photos (DB table: campaign_photos)
+# ════════════════════════════════════════════════════════════════════════════
+
+class CampaignPhotoResponse(BaseModel):
+    id: int  # photo_id
+    campaign_id: int
+    s3_bucket: Optional[str] = None
+    s3_key: Optional[str] = None
+    content_type: Optional[str] = None
+    file_size_bytes: Optional[int] = None
+    width_px: Optional[int] = None
+    height_px: Optional[int] = None
+    is_primary: bool = False
+    sort_order: int = 0
+    uploaded_by_creator_id: Optional[str] = None
+    time_created: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Interests (DB table: interests)
+# ════════════════════════════════════════════════════════════════════════════
+
+class InterestResponse(BaseModel):
+    id: int  # interest_id
+    name: Optional[str] = None
+    time_created: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Campaign Types (DB table: campaign_types)
+# ════════════════════════════════════════════════════════════════════════════
+
+class CampaignTypeResponse(BaseModel):
+    id: int  # type_id
+    name: Optional[str] = None
+    description: Optional[str] = None
+    time_created: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Payment Details (kept for Stripe integration)
 # ════════════════════════════════════════════════════════════════════════════
 
 class PaymentDetailCreate(BaseModel):
@@ -297,21 +494,21 @@ class PaymentDetailCreate(BaseModel):
 
 
 class PaymentDetailResponse(BaseModel):
-    id: str
-    user_id: str
-    account_type: str
-    account_holder_name: str
+    id: Optional[str] = None
+    user_id: Optional[str] = None
+    account_type: Optional[str] = None
+    account_holder_name: Optional[str] = None
     routing_number_last4: Optional[str] = None
     account_number_last4: Optional[str] = None
-    is_verified: bool
-    is_default: bool
-    created_at: datetime
+    is_verified: bool = False
+    is_default: bool = True
+    created_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Billing Address
+# Billing Address (kept for Stripe integration)
 # ════════════════════════════════════════════════════════════════════════════
 
 class BillingAddressCreate(BaseModel):
@@ -325,17 +522,17 @@ class BillingAddressCreate(BaseModel):
 
 
 class BillingAddressResponse(BaseModel):
-    id: str
-    user_id: str
-    full_name: str
-    address_line1: str
+    id: Optional[str] = None
+    user_id: Optional[str] = None
+    full_name: Optional[str] = None
+    address_line1: Optional[str] = None
     address_line2: Optional[str] = None
-    city: str
+    city: Optional[str] = None
     state: Optional[str] = None
-    postal_code: str
-    country: str
-    is_default: bool
-    created_at: datetime
+    postal_code: Optional[str] = None
+    country: Optional[str] = None
+    is_default: bool = True
+    created_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 

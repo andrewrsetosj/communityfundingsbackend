@@ -5,7 +5,7 @@ Create, edit, publish, cancel, search, filter, featured
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func as sqlfunc, or_
+from sqlalchemy import select, func as sqlfunc, or_, text
 from sqlalchemy.orm import selectinload
 from typing import Optional, List
 from decimal import Decimal
@@ -18,6 +18,7 @@ from app.models.models import Campaign, CampaignStatus, User, Donation, Donation
 from app.models.schemas import (
     CampaignCreate, CampaignUpdate, CampaignResponse, CampaignListResponse,
 )
+import db
 
 router = APIRouter(prefix="/api/campaigns", tags=["campaigns"])
 
@@ -45,15 +46,15 @@ def build_campaign_response(c: Campaign, creator_name: Optional[str] = None) -> 
 
     return CampaignResponse(
         id=c.id, title=c.title, slug=c.slug,
-        short_description=c.short_description, description=c.description,
+        description=c.description,
         goal_amount=goal, raised_amount=raised,
-        image_url=c.image_url, video_url=c.video_url,
         creator_id=c.creator_id,
         creator_name=creator_name or (c.creator.name if c.creator else None),
-        status=c.status.value if isinstance(c.status, CampaignStatus) else c.status,
+        status=c.status,
         donors_count=c.donors_count or 0,
         category=c.category, location=c.location,
-        end_date=c.end_date, is_featured=c.is_featured or False,
+        end_date=c.end_date,
+        bio=c.bio, duration_days=c.duration_days,
         funding_percentage=pct, days_left=days_left,
         created_at=c.created_at,
     )
@@ -65,6 +66,7 @@ def build_campaign_response(c: Campaign, creator_name: Optional[str] = None) -> 
 async def list_campaigns(
     status: Optional[str] = "active",
     category: Optional[str] = None,
+    location: Optional[str] = None,
     q: Optional[str] = None,
     sort: Optional[str] = "recent",  # recent | popular | ending_soon | most_funded
     featured: Optional[bool] = None,
@@ -80,8 +82,8 @@ async def list_campaigns(
         query = query.where(Campaign.status == status)
     if category:
         query = query.where(Campaign.category == category)
-    if featured is not None:
-        query = query.where(Campaign.is_featured == featured)
+    if location:
+        query = query.where(Campaign.location.ilike(f"%{location}%"))
     if q:
         search = f"%{q}%"
         query = query.where(
@@ -119,7 +121,7 @@ async def get_categories(db: AsyncSession = Depends(get_db)):
     """Get all categories with campaign counts."""
     result = await db.execute(
         select(Campaign.category, sqlfunc.count(Campaign.id))
-        .where(Campaign.status == CampaignStatus.ACTIVE)
+        .where(Campaign.status == "active")
         .where(Campaign.category.isnot(None))
         .group_by(Campaign.category)
         .order_by(sqlfunc.count(Campaign.id).desc())
@@ -127,15 +129,42 @@ async def get_categories(db: AsyncSession = Depends(get_db)):
     return [{"name": row[0], "count": row[1]} for row in result.all()]
 
 
+@router.get("/stats")
+async def platform_stats():
+    """Get real-time platform statistics."""
+    try:
+        return await db.get_platform_stats()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/featured", response_model=List[CampaignResponse])
 async def get_featured(db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(Campaign)
-        .where(Campaign.is_featured == True, Campaign.status == CampaignStatus.ACTIVE)
+        .where(Campaign.status == "active")
         .order_by(Campaign.raised_amount.desc())
         .limit(6)
     )
     return [build_campaign_response(c) for c in result.scalars().all()]
+
+
+@router.get("/check-slug")
+async def check_slug(slug: str, db: AsyncSession = Depends(get_db)):
+    """
+    Check if a vanity slug is available.
+    Returns {"available": bool}.
+    """
+    candidate = (slug or "").strip()
+    if not candidate:
+        raise HTTPException(status_code=400, detail="Slug is required")
+
+    # DB schema uses campaigns.campaign_id + campaigns.url, not ORM's id/slug.
+    result = await db.execute(
+        text("SELECT campaign_id FROM public.campaigns WHERE url = :slug LIMIT 1"),
+        {"slug": candidate},
+    )
+    return {"available": result.first() is None}
 
 
 @router.get("/my-campaigns", response_model=List[CampaignResponse])
@@ -148,6 +177,79 @@ async def my_campaigns(
         select(Campaign).where(Campaign.creator_id == user.id).order_by(Campaign.created_at.desc())
     )
     return [build_campaign_response(c, creator_name=user.name) for c in result.scalars().all()]
+
+
+# ── Drafts ─────────────────────────────────────────────────────────────────
+
+@router.get("/my-drafts")
+async def my_drafts(user: User = Depends(get_current_user)):
+    """List all draft campaigns for the authenticated user."""
+    try:
+        return await db.list_draft_campaigns(user.id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/drafts")
+async def save_draft(data: dict, user: User = Depends(get_current_user)):
+    """Create or update a draft campaign."""
+    data["creator_id"] = user.id
+    try:
+        return await db.upsert_draft_campaign(data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/drafts/{campaign_id}")
+async def delete_draft(campaign_id: int, user: User = Depends(get_current_user)):
+    """Hard-delete a draft campaign and its related data."""
+    pool = await db.get_pool()
+    async with pool.acquire() as conn:
+        # Verify it's a draft owned by this user
+        row = await conn.fetchrow(
+            "SELECT status, creator_id FROM campaigns WHERE campaign_id = $1",
+            campaign_id,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Draft not found")
+        if row["creator_id"] != user.id:
+            raise HTTPException(status_code=403, detail="Not your draft")
+        if row["status"] != "draft":
+            raise HTTPException(status_code=400, detail="Only drafts can be deleted")
+
+        # Delete related rows first, then the campaign
+        await conn.execute("DELETE FROM faqs WHERE campaign_id = $1", campaign_id)
+        await conn.execute("DELETE FROM rewards WHERE campaign_id = $1", campaign_id)
+        await conn.execute("DELETE FROM collaborators WHERE campaign_id = $1", campaign_id)
+        await conn.execute("DELETE FROM campaigns WHERE campaign_id = $1", campaign_id)
+
+    return {"status": "deleted", "campaign_id": campaign_id}
+
+
+@router.get("/drafts/{campaign_id}")
+async def get_draft(campaign_id: int, user: User = Depends(get_current_user)):
+    """Get a single draft campaign with all related data."""
+    result = await db.get_draft_campaign(campaign_id, user.id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    return result
+
+
+# ── Finalize from create-project wizard ─────────────────────────────────────
+
+@router.post("/finalize")
+async def finalize_campaign(data: dict):
+    """
+    Submit create-project draft and write campaigns/faqs/rewards/collaborators.
+    """
+    try:
+        return await db.finalize_campaign(data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── Get by ID or slug ──────────────────────────────────────────────────────
@@ -185,13 +287,10 @@ async def create_campaign(
     campaign = Campaign(
         title=data.title,
         slug=slug,
-        short_description=data.short_description,
         description=data.description,
-        goal_amount=Decimal(str(data.goal_amount)),
-        image_url=data.image_url,
-        video_url=data.video_url,
+        goal_amount=int(Decimal(str(data.goal_amount)) * 100) if data.goal_amount else 0,
         creator_id=user.id,
-        status=CampaignStatus.DRAFT,
+        status="draft",
         category=data.category,
         location=data.location,
         end_date=datetime.fromisoformat(data.end_date.replace("Z", "+00:00")) if data.end_date else None,
@@ -218,19 +317,13 @@ async def update_campaign(
         raise HTTPException(status_code=404, detail="Campaign not found")
     if campaign.creator_id != user.id:
         raise HTTPException(status_code=403, detail="Not your campaign")
-    if campaign.status in (CampaignStatus.FUNDED, CampaignStatus.CANCELLED, CampaignStatus.SUSPENDED):
-        raise HTTPException(status_code=400, detail=f"Cannot edit a {campaign.status.value} campaign")
+    if campaign.status in ("funded", "cancelled", "suspended"):
+        raise HTTPException(status_code=400, detail=f"Cannot edit a {campaign.status} campaign")
 
     if data.title is not None:
         campaign.title = data.title
-    if data.short_description is not None:
-        campaign.short_description = data.short_description
     if data.description is not None:
         campaign.description = data.description
-    if data.image_url is not None:
-        campaign.image_url = data.image_url
-    if data.video_url is not None:
-        campaign.video_url = data.video_url
     if data.category is not None:
         campaign.category = data.category
     if data.location is not None:
@@ -257,30 +350,32 @@ async def publish_campaign(
         raise HTTPException(status_code=404, detail="Campaign not found")
     if campaign.creator_id != user.id:
         raise HTTPException(status_code=403, detail="Not your campaign")
-    if campaign.status != CampaignStatus.DRAFT:
+    if campaign.status != "draft":
         raise HTTPException(status_code=400, detail="Only draft campaigns can be published")
 
-    campaign.status = CampaignStatus.ACTIVE
+    campaign.status = "active"
     await db.flush()
     return build_campaign_response(campaign, creator_name=user.name)
 
 
 # ── Cancel ─────────────────────────────────────────────────────────────────
 
-@router.post("/{campaign_id}/cancel", response_model=CampaignResponse)
+@router.post("/{campaign_id}/cancel")
 async def cancel_campaign(
-    campaign_id: str,
+    campaign_id: int,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Cancel a campaign. Only creator. Cannot cancel if already funded."""
-    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    result = await db.execute(
+        select(Campaign).where(Campaign.id == campaign_id)
+    )
     campaign = result.scalar_one_or_none()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
     if campaign.creator_id != user.id:
         raise HTTPException(status_code=403, detail="Not your campaign")
-    if campaign.status == CampaignStatus.FUNDED:
+    if campaign.status == "funded":
         raise HTTPException(status_code=400, detail="Cannot cancel a funded campaign")
 
     campaign.status = CampaignStatus.CANCELLED
