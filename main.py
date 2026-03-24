@@ -103,7 +103,6 @@ app.include_router(comments_router)
 app.include_router(reports_router)
 app.include_router(uploads_router)
 app.include_router(admin_router)
-app.include_router(campaign_page_router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -270,3 +269,17 @@ async def debug_echo_authorization(request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=4000, reload=True)
+
+# ── Stats endpoint (no prefix) ──────────────────────────────────────────
+from sqlalchemy import select, func as sqlfunc
+from app.database import get_db
+from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import Depends as Dep
+from app.models.models import Campaign
+
+@app.get("/api/stats")
+async def get_platform_stats(db: AsyncSession = Dep(get_db)):
+    total_campaigns = (await db.execute(select(sqlfunc.count(Campaign.id)))).scalar() or 0
+    total_raised = (await db.execute(select(sqlfunc.coalesce(sqlfunc.sum(Campaign.raised_amount), 0)))).scalar() or 0
+    total_donors = (await db.execute(select(sqlfunc.coalesce(sqlfunc.sum(Campaign.donors_count), 0)))).scalar() or 0
+    return {"total_campaigns": total_campaigns, "total_raised": float(total_raised), "total_donors": int(total_donors)}

@@ -286,3 +286,4 @@ async def cancel_campaign(
     campaign.status = CampaignStatus.CANCELLED
     await db.flush()
     return build_campaign_response(campaign, creator_name=user.name)
+

@@ -104,7 +104,7 @@ async def create_comment(
     )
     db.add(comment)
     await db.flush()
-
+    await db.commit()
     return CommentResponse(
         id=comment.id,
         campaign_id=comment.campaign_id,
@@ -138,4 +138,5 @@ async def delete_comment(
     if comment.user_id != user.id:
         raise HTTPException(status_code=403, detail="Not your comment")
     await db.delete(comment)
+    await db.commit()
     return {"deleted": True}
