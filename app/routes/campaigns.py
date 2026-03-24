@@ -66,6 +66,7 @@ def build_campaign_response(c: Campaign, creator_name: Optional[str] = None) -> 
 async def list_campaigns(
     status: Optional[str] = "active",
     category: Optional[str] = None,
+    location: Optional[str] = None,
     q: Optional[str] = None,
     sort: Optional[str] = "recent",  # recent | popular | ending_soon | most_funded
     featured: Optional[bool] = None,
@@ -81,6 +82,8 @@ async def list_campaigns(
         query = query.where(Campaign.status == status)
     if category:
         query = query.where(Campaign.category == category)
+    if location:
+        query = query.where(Campaign.location.ilike(f"%{location}%"))
     if q:
         search = f"%{q}%"
         query = query.where(
@@ -197,6 +200,32 @@ async def save_draft(data: dict, user: User = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/drafts/{campaign_id}")
+async def delete_draft(campaign_id: int, user: User = Depends(get_current_user)):
+    """Hard-delete a draft campaign and its related data."""
+    pool = await db.get_pool()
+    async with pool.acquire() as conn:
+        # Verify it's a draft owned by this user
+        row = await conn.fetchrow(
+            "SELECT status, creator_id FROM campaigns WHERE campaign_id = $1",
+            campaign_id,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Draft not found")
+        if row["creator_id"] != user.id:
+            raise HTTPException(status_code=403, detail="Not your draft")
+        if row["status"] != "draft":
+            raise HTTPException(status_code=400, detail="Only drafts can be deleted")
+
+        # Delete related rows first, then the campaign
+        await conn.execute("DELETE FROM faqs WHERE campaign_id = $1", campaign_id)
+        await conn.execute("DELETE FROM rewards WHERE campaign_id = $1", campaign_id)
+        await conn.execute("DELETE FROM collaborators WHERE campaign_id = $1", campaign_id)
+        await conn.execute("DELETE FROM campaigns WHERE campaign_id = $1", campaign_id)
+
+    return {"status": "deleted", "campaign_id": campaign_id}
 
 
 @router.get("/drafts/{campaign_id}")
@@ -331,14 +360,16 @@ async def publish_campaign(
 
 # ── Cancel ─────────────────────────────────────────────────────────────────
 
-@router.post("/{campaign_id}/cancel", response_model=CampaignResponse)
+@router.post("/{campaign_id}/cancel")
 async def cancel_campaign(
-    campaign_id: str,
+    campaign_id: int,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Cancel a campaign. Only creator. Cannot cancel if already funded."""
-    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    result = await db.execute(
+        select(Campaign).where(Campaign.id == campaign_id)
+    )
     campaign = result.scalar_one_or_none()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -348,5 +379,5 @@ async def cancel_campaign(
         raise HTTPException(status_code=400, detail="Cannot cancel a funded campaign")
 
     campaign.status = "cancelled"
-    await db.flush()
-    return build_campaign_response(campaign, creator_name=user.name)
+    await db.commit()
+    return {"status": "cancelled", "campaign_id": campaign_id}
