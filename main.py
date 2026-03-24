@@ -35,6 +35,7 @@ from app.routes.updates import router as updates_router
 from app.routes.comments import router as comments_router
 from app.routes.reports import router as reports_router
 from app.routes.uploads import router as uploads_router
+from app.routes.campaign_page import router as campaign_page_router
 from app.routes.admin import router as admin_router
 
 
@@ -98,10 +99,6 @@ app.include_router(reports_router)
 app.include_router(uploads_router)
 app.include_router(admin_router)
 app.include_router(campaign_page_router)
-
-print("APP ROUTES:")
-for r in app.routes:
-    print(getattr(r, "path", r))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -192,7 +189,7 @@ async def verify_and_store(request: Request):
     try:
         row = await upsert_creator(
             creator_id=str(clerk_id),
-            first_name=first_name,
+            name=first_name,
             last_name=last_name,
             email=email,
         )

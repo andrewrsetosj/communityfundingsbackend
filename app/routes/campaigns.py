@@ -46,15 +46,15 @@ def build_campaign_response(c: Campaign, creator_name: Optional[str] = None) -> 
 
     return CampaignResponse(
         id=c.id, title=c.title, slug=c.slug,
-        short_description=c.short_description, description=c.description,
+        description=c.description,
         goal_amount=goal, raised_amount=raised,
-        image_url=c.image_url, video_url=c.video_url,
         creator_id=c.creator_id,
         creator_name=creator_name or (c.creator.name if c.creator else None),
-        status=c.status.value if isinstance(c.status, CampaignStatus) else c.status,
+        status=c.status,
         donors_count=c.donors_count or 0,
         category=c.category, location=c.location,
-        end_date=c.end_date, is_featured=c.is_featured or False,
+        end_date=c.end_date,
+        bio=c.bio, duration_days=c.duration_days,
         funding_percentage=pct, days_left=days_left,
         created_at=c.created_at,
     )
@@ -81,8 +81,6 @@ async def list_campaigns(
         query = query.where(Campaign.status == status)
     if category:
         query = query.where(Campaign.category == category)
-    if featured is not None:
-        query = query.where(Campaign.is_featured == featured)
     if q:
         search = f"%{q}%"
         query = query.where(
@@ -120,7 +118,7 @@ async def get_categories(db: AsyncSession = Depends(get_db)):
     """Get all categories with campaign counts."""
     result = await db.execute(
         select(Campaign.category, sqlfunc.count(Campaign.id))
-        .where(Campaign.status == CampaignStatus.ACTIVE)
+        .where(Campaign.status == "active")
         .where(Campaign.category.isnot(None))
         .group_by(Campaign.category)
         .order_by(sqlfunc.count(Campaign.id).desc())
@@ -128,11 +126,20 @@ async def get_categories(db: AsyncSession = Depends(get_db)):
     return [{"name": row[0], "count": row[1]} for row in result.all()]
 
 
+@router.get("/stats")
+async def platform_stats():
+    """Get real-time platform statistics."""
+    try:
+        return await db.get_platform_stats()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/featured", response_model=List[CampaignResponse])
 async def get_featured(db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(Campaign)
-        .where(Campaign.is_featured == True, Campaign.status == CampaignStatus.ACTIVE)
+        .where(Campaign.status == "active")
         .order_by(Campaign.raised_amount.desc())
         .limit(6)
     )
@@ -167,6 +174,38 @@ async def my_campaigns(
         select(Campaign).where(Campaign.creator_id == user.id).order_by(Campaign.created_at.desc())
     )
     return [build_campaign_response(c, creator_name=user.name) for c in result.scalars().all()]
+
+
+# ── Drafts ─────────────────────────────────────────────────────────────────
+
+@router.get("/my-drafts")
+async def my_drafts(user: User = Depends(get_current_user)):
+    """List all draft campaigns for the authenticated user."""
+    try:
+        return await db.list_draft_campaigns(user.id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/drafts")
+async def save_draft(data: dict, user: User = Depends(get_current_user)):
+    """Create or update a draft campaign."""
+    data["creator_id"] = user.id
+    try:
+        return await db.upsert_draft_campaign(data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/drafts/{campaign_id}")
+async def get_draft(campaign_id: int, user: User = Depends(get_current_user)):
+    """Get a single draft campaign with all related data."""
+    result = await db.get_draft_campaign(campaign_id, user.id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    return result
 
 
 # ── Finalize from create-project wizard ─────────────────────────────────────
@@ -219,13 +258,10 @@ async def create_campaign(
     campaign = Campaign(
         title=data.title,
         slug=slug,
-        short_description=data.short_description,
         description=data.description,
-        goal_amount=Decimal(str(data.goal_amount)),
-        image_url=data.image_url,
-        video_url=data.video_url,
+        goal_amount=int(Decimal(str(data.goal_amount)) * 100) if data.goal_amount else 0,
         creator_id=user.id,
-        status=CampaignStatus.DRAFT,
+        status="draft",
         category=data.category,
         location=data.location,
         end_date=datetime.fromisoformat(data.end_date.replace("Z", "+00:00")) if data.end_date else None,
@@ -252,19 +288,13 @@ async def update_campaign(
         raise HTTPException(status_code=404, detail="Campaign not found")
     if campaign.creator_id != user.id:
         raise HTTPException(status_code=403, detail="Not your campaign")
-    if campaign.status in (CampaignStatus.FUNDED, CampaignStatus.CANCELLED, CampaignStatus.SUSPENDED):
-        raise HTTPException(status_code=400, detail=f"Cannot edit a {campaign.status.value} campaign")
+    if campaign.status in ("funded", "cancelled", "suspended"):
+        raise HTTPException(status_code=400, detail=f"Cannot edit a {campaign.status} campaign")
 
     if data.title is not None:
         campaign.title = data.title
-    if data.short_description is not None:
-        campaign.short_description = data.short_description
     if data.description is not None:
         campaign.description = data.description
-    if data.image_url is not None:
-        campaign.image_url = data.image_url
-    if data.video_url is not None:
-        campaign.video_url = data.video_url
     if data.category is not None:
         campaign.category = data.category
     if data.location is not None:
@@ -291,10 +321,10 @@ async def publish_campaign(
         raise HTTPException(status_code=404, detail="Campaign not found")
     if campaign.creator_id != user.id:
         raise HTTPException(status_code=403, detail="Not your campaign")
-    if campaign.status != CampaignStatus.DRAFT:
+    if campaign.status != "draft":
         raise HTTPException(status_code=400, detail="Only draft campaigns can be published")
 
-    campaign.status = CampaignStatus.ACTIVE
+    campaign.status = "active"
     await db.flush()
     return build_campaign_response(campaign, creator_name=user.name)
 
@@ -314,9 +344,9 @@ async def cancel_campaign(
         raise HTTPException(status_code=404, detail="Campaign not found")
     if campaign.creator_id != user.id:
         raise HTTPException(status_code=403, detail="Not your campaign")
-    if campaign.status == CampaignStatus.FUNDED:
+    if campaign.status == "funded":
         raise HTTPException(status_code=400, detail="Cannot cancel a funded campaign")
 
-    campaign.status = CampaignStatus.CANCELLED
+    campaign.status = "cancelled"
     await db.flush()
     return build_campaign_response(campaign, creator_name=user.name)
