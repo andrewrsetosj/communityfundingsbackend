@@ -35,7 +35,6 @@ from app.routes.updates import router as updates_router
 from app.routes.comments import router as comments_router
 from app.routes.reports import router as reports_router
 from app.routes.uploads import router as uploads_router
-from app.routes.campaign_page import router as campaign_page_router
 from app.routes.admin import router as admin_router
 
 
