@@ -36,6 +36,7 @@ from app.routes.comments import router as comments_router
 from app.routes.reports import router as reports_router
 from app.routes.uploads import router as uploads_router
 from app.routes.admin import router as admin_router
+from app.routes.profile_page import router as profile_page_router
 
 
 
@@ -98,6 +99,7 @@ app.include_router(reports_router)
 app.include_router(uploads_router)
 app.include_router(admin_router)
 app.include_router(campaign_page_router)
+app.include_router(profile_page_router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -126,6 +128,10 @@ async def get_current_user(authorization: str = Header(None)):
 # ─────────────────────────────────────────────────────────────────────────────
 # Root / Config
 # ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/test-profile-route")
+async def test_profile_route():
+    return {"ok": True}
 
 @app.get("/")
 async def root():
