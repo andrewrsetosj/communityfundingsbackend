@@ -4,31 +4,30 @@ from app.db import get_pool
 router = APIRouter(prefix="/api/campaign-page", tags=["campaign-page"])
         
 @router.get("/{campaign_id}")
-async def get_campaign_page(campaign_id: int):
+async def get_campaign_page(campaign_id: str):
     """
-    Campaign details endpoint that matches the DBeaver schema:
-    - campaigns
-    - creators
-    - campaign_faqs
-    - campaign_rewards
-    - comments
+    Campaign details endpoint that accepts either an integer ID or a slug.
     """
     pool = await get_pool()
 
     async with pool.acquire() as conn:
-        # 1) Campaign
-        campaign = await conn.fetchrow(
-            """
-            SELECT *
-            FROM campaigns
-            WHERE campaign_id = $1
-            """,
-            campaign_id,
-        )
+        # 1) Campaign — try by integer ID first, then by slug
+        campaign = None
+        if campaign_id.isdigit():
+            campaign = await conn.fetchrow(
+                "SELECT * FROM campaigns WHERE campaign_id = $1",
+                int(campaign_id),
+            )
+        if not campaign:
+            campaign = await conn.fetchrow(
+                "SELECT * FROM campaigns WHERE url = $1",
+                campaign_id,
+            )
         if not campaign:
             raise HTTPException(status_code=404, detail="Campaign not found")
 
         campaign = dict(campaign)
+        cid = campaign["campaign_id"]
 
         # 2) Creator (owner of campaign)
         creator = await conn.fetchrow(
@@ -49,7 +48,7 @@ async def get_campaign_page(campaign_id: int):
             WHERE campaign_id = $1
             ORDER BY display_order ASC
             """,
-            campaign_id,
+            cid,
         )
         faqs = [dict(f) for f in faqs]
 
@@ -61,7 +60,7 @@ async def get_campaign_page(campaign_id: int):
             WHERE campaign_id = $1
             ORDER BY display_order ASC, reward_id ASC
             """,
-            campaign_id,
+            cid,
         )
         rewards = [dict(r) for r in rewards]
 
@@ -73,7 +72,7 @@ async def get_campaign_page(campaign_id: int):
             WHERE campaign_id = $1
             ORDER BY is_primary DESC, photo_id ASC
             """,
-            campaign_id,
+            cid,
         )
         photos = [dict(p) for p in photos]
 
@@ -99,7 +98,7 @@ async def get_campaign_page(campaign_id: int):
             WHERE c.campaign_id = $1
             ORDER BY c.time_created DESC, c.comment_id DESC
             """,
-            campaign_id,
+            cid,
         )
         comments = [dict(c) for c in comments]
 

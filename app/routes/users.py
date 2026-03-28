@@ -9,6 +9,7 @@ from typing import List
 
 from app.database import get_db
 from app.auth import get_current_user
+import db as db_mod
 from app.models.models import User, PaymentDetail, BillingAddress, AccountType
 from app.models.schemas import (
     UserResponse, UserPublicResponse, UserProfileUpdate,
@@ -191,3 +192,55 @@ async def get_billing_addresses(
         )
         for a in result.scalars().all()
     ]
+
+
+# ── Interests ─────────────────────────────────────────────────────────────
+
+@router.get("/me/interests")
+async def get_my_interests(user: User = Depends(get_current_user)):
+    """Get the authenticated user's selected interests."""
+    pool = await db_mod.get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT i.interest_id, i.name
+            FROM creator_interests ci
+            JOIN interests i ON i.interest_id = ci.interest_id
+            WHERE ci.creator_id = $1
+            ORDER BY i.name
+            """,
+            user.id,
+        )
+        return [{"interest_id": r["interest_id"], "name": r["name"]} for r in rows]
+
+
+@router.put("/me/interests")
+async def set_my_interests(
+    data: dict,
+    user: User = Depends(get_current_user),
+):
+    """Replace the user's interests. Expects {"interest_names": ["Art", "Music", ...]}"""
+    names = data.get("interest_names", [])
+    if not isinstance(names, list):
+        raise HTTPException(status_code=400, detail="interest_names must be a list")
+
+    pool = await db_mod.get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Clear existing
+            await conn.execute(
+                "DELETE FROM creator_interests WHERE creator_id = $1",
+                user.id,
+            )
+            # Look up interest IDs by name and insert
+            for name in names:
+                interest = await conn.fetchrow(
+                    "SELECT interest_id FROM interests WHERE name = $1",
+                    name,
+                )
+                if interest:
+                    await conn.execute(
+                        "INSERT INTO creator_interests (creator_id, interest_id) VALUES ($1, $2)",
+                        user.id, interest["interest_id"],
+                    )
+    return {"saved": len(names)}
