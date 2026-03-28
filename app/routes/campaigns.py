@@ -202,6 +202,24 @@ async def save_draft(data: dict, user: User = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.put("/drafts/{campaign_id}/photos")
+async def replace_draft_photos(
+    campaign_id: int,
+    data: dict,
+    user: User = Depends(get_current_user),
+):
+    """Persist campaign_photos after files are stored in S3."""
+    try:
+        await db.replace_campaign_photos(
+            campaign_id, user.id, data.get("photos") or []
+        )
+        return {"ok": True, "campaign_id": campaign_id}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.delete("/drafts/{campaign_id}")
 async def delete_draft(campaign_id: int, user: User = Depends(get_current_user)):
     """Hard-delete a draft campaign and its related data."""
@@ -223,6 +241,7 @@ async def delete_draft(campaign_id: int, user: User = Depends(get_current_user))
         await conn.execute("DELETE FROM faqs WHERE campaign_id = $1", campaign_id)
         await conn.execute("DELETE FROM rewards WHERE campaign_id = $1", campaign_id)
         await conn.execute("DELETE FROM collaborators WHERE campaign_id = $1", campaign_id)
+        await conn.execute("DELETE FROM campaign_photos WHERE campaign_id = $1", campaign_id)
         await conn.execute("DELETE FROM campaigns WHERE campaign_id = $1", campaign_id)
 
     return {"status": "deleted", "campaign_id": campaign_id}

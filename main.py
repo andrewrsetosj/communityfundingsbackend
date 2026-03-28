@@ -2,10 +2,17 @@
 Community Fundings — FastAPI Backend
 Full crowdfunding platform with Stripe + PostgreSQL RDS
 """
-from dotenv import load_dotenv
-load_dotenv()
-
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Always load backend/.env next to this file — not "whatever .env is in the shell cwd"
+_backend_dir = Path(__file__).resolve().parent
+load_dotenv(_backend_dir / ".env")
+# Exported vars in your shell win over .env unless you: unset them, or set DOTENV_OVERRIDE=1
+if os.getenv("DOTENV_OVERRIDE", "").lower() in ("1", "true", "yes"):
+    load_dotenv(_backend_dir / ".env", override=True)
 import sys
 import traceback
 from contextlib import asynccontextmanager

@@ -7,7 +7,7 @@ import os
 import re
 import ssl
 from datetime import datetime, timezone, timedelta
-from typing import Any
+from typing import Any, Iterable
 
 import asyncpg
 
@@ -168,6 +168,110 @@ async def get_platform_stats() -> dict[str, Any]:
         "total_raised_cents": int(total_raised),
         "total_pledges": int(total_donations),
     }
+
+
+def _campaign_photo_public_url(s3_bucket: str, s3_key: str) -> str:
+    region = (os.getenv("AWS_REGION") or "us-east-2").strip()
+    return f"https://{s3_bucket}.s3.{region}.amazonaws.com/{s3_key}"
+
+
+async def replace_campaign_photos_conn(
+    conn: asyncpg.Connection,
+    campaign_id: int,
+    creator_id: str,
+    photos: Iterable[dict[str, Any]],
+) -> None:
+    photo_list = list(photos)
+
+    row = await conn.fetchrow(
+        """
+        SELECT creator_id, status FROM public.campaigns
+        WHERE campaign_id = $1
+        LIMIT 1
+        """,
+        campaign_id,
+    )
+    if not row:
+        raise ValueError("Campaign not found")
+    if str(row["creator_id"]) != str(creator_id):
+        raise ValueError("Campaign not found or not owned by this user")
+    if str(row["status"]) not in ("draft", "pending_review"):
+        raise ValueError("Photos can only be updated for draft or pending-review campaigns")
+
+    await conn.execute(
+        "DELETE FROM public.campaign_photos WHERE campaign_id = $1",
+        campaign_id,
+    )
+
+    insert_sql = """
+        INSERT INTO public.campaign_photos (
+            campaign_id, s3_bucket, s3_key, content_type,
+            is_primary, sort_order, uploaded_by_creator_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+    """
+
+    for i, p in enumerate(photo_list):
+        bucket = str((p or {}).get("s3_bucket") or "").strip()
+        key = str((p or {}).get("s3_key") or "").strip()
+        if not bucket or not key:
+            continue
+        ctype = str((p or {}).get("content_type") or "image/jpeg").strip() or "image/jpeg"
+        is_primary = bool((p or {}).get("is_primary", False))
+        sort_order = int((p or {}).get("sort_order", i))
+        await conn.execute(
+            insert_sql,
+            campaign_id,
+            bucket,
+            key,
+            ctype,
+            is_primary,
+            sort_order,
+            creator_id,
+        )
+
+    primaries = await conn.fetch(
+        """
+        SELECT photo_id FROM public.campaign_photos
+        WHERE campaign_id = $1 AND is_primary = TRUE
+        ORDER BY sort_order, photo_id
+        """,
+        campaign_id,
+    )
+    if len(primaries) > 1:
+        for extra in primaries[1:]:
+            await conn.execute(
+                "UPDATE public.campaign_photos SET is_primary = FALSE WHERE photo_id = $1",
+                extra["photo_id"],
+            )
+    rows_left = await conn.fetch(
+        "SELECT photo_id FROM public.campaign_photos WHERE campaign_id = $1 ORDER BY sort_order, photo_id",
+        campaign_id,
+    )
+    primaries_after = await conn.fetch(
+        """
+        SELECT photo_id FROM public.campaign_photos
+        WHERE campaign_id = $1 AND is_primary = TRUE
+        ORDER BY sort_order, photo_id
+        """,
+        campaign_id,
+    )
+    if rows_left and len(primaries_after) == 0:
+        await conn.execute(
+            "UPDATE public.campaign_photos SET is_primary = TRUE WHERE photo_id = $1",
+            rows_left[0]["photo_id"],
+        )
+
+
+async def replace_campaign_photos(
+    campaign_id: int,
+    creator_id: str,
+    photos: Iterable[dict[str, Any]],
+) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await replace_campaign_photos_conn(conn, campaign_id, creator_id, photos)
 
 
 async def _ensure_creator_exists(conn: asyncpg.Connection, creator_id: str, bio: str | None) -> None:
@@ -363,6 +467,11 @@ async def finalize_campaign(data: dict[str, Any]) -> dict[str, Any]:
                     collaborator_rows,
                 )
 
+            if "photos" in data:
+                await replace_campaign_photos_conn(
+                    conn, campaign_id, creator_id, data.get("photos") or []
+                )
+
     return {"campaign_id": row["campaign_id"], "slug": row["url"] or url}
 
 
@@ -535,6 +644,30 @@ async def get_draft_campaign(campaign_id: int, creator_id: str) -> dict[str, Any
             "SELECT email FROM public.collaborators WHERE campaign_id = $1",
             campaign_id,
         )
+        photos = await conn.fetch(
+            """
+            SELECT s3_bucket, s3_key, content_type, is_primary, sort_order
+            FROM public.campaign_photos
+            WHERE campaign_id = $1
+            ORDER BY is_primary DESC, sort_order ASC, photo_id ASC
+            """,
+            campaign_id,
+        )
+
+    photo_list: list[dict[str, Any]] = []
+    for p in photos:
+        bucket = (p["s3_bucket"] or "").strip()
+        key = (p["s3_key"] or "").strip()
+        photo_list.append(
+            {
+                "s3_bucket": bucket,
+                "s3_key": key,
+                "content_type": p["content_type"] or "image/jpeg",
+                "is_primary": bool(p["is_primary"]),
+                "sort_order": int(p["sort_order"] or 0),
+                "image_url": _campaign_photo_public_url(bucket, key) if bucket and key else None,
+            }
+        )
 
     return {
         "campaign_id": campaign["campaign_id"],
@@ -546,6 +679,7 @@ async def get_draft_campaign(campaign_id: int, creator_id: str) -> dict[str, Any
         "description_html": campaign["description_html"] or "",
         "bio": campaign["bio"] or "",
         "vanity_slug": campaign["url"] or "",
+        "photos": photo_list,
         "rewards": [
             {
                 "title": r["title"] or "",
