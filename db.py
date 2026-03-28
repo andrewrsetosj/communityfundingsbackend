@@ -152,7 +152,7 @@ async def get_platform_stats() -> dict[str, Any]:
     pool = await get_pool()
     async with pool.acquire() as conn:
         funded_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM public.campaigns WHERE status = 'funded'"
+            "SELECT COUNT(*) FROM public.campaigns WHERE status = 'active' AND amount_raised_cents > 100"
         ) or 0
 
         total_raised = await conn.fetchval(
