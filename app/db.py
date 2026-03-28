@@ -13,12 +13,13 @@ import re
 import sys
 import traceback
 import datetime
+from pathlib import Path
 from typing import Optional, Any
 
 import asyncpg
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 # Read DB URL from environment (expected to be postgresql+asyncpg://... or postgresql://...)
 DATABASE_URL: Optional[str] = os.getenv("DATABASE_URL") or None
