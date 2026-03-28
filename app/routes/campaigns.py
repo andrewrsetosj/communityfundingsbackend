@@ -18,7 +18,7 @@ from app.models.models import Campaign, CampaignStatus, User, Donation, Donation
 from app.models.schemas import (
     CampaignCreate, CampaignUpdate, CampaignResponse, CampaignListResponse,
 )
-import db
+import db as db_mod
 
 router = APIRouter(prefix="/api/campaigns", tags=["campaigns"])
 
@@ -133,7 +133,7 @@ async def get_categories(db: AsyncSession = Depends(get_db)):
 async def platform_stats():
     """Get real-time platform statistics."""
     try:
-        return await db.get_platform_stats()
+        return await db_mod.get_platform_stats()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -179,13 +179,48 @@ async def my_campaigns(
     return [build_campaign_response(c, creator_name=user.name) for c in result.scalars().all()]
 
 
+@router.get("/my-organizations")
+async def my_organizations(user: User = Depends(get_current_user)):
+    """Get organizations the user belongs to, with their campaigns."""
+    pool = await db_mod.get_pool()
+    async with pool.acquire() as conn:
+        orgs = await conn.fetch(
+            """
+            SELECT c.creator_id, c.name, c.last_name, c.bio
+            FROM organization_members om
+            JOIN creators c ON c.creator_id = om.organization_id
+            WHERE om.member_id = $1
+            """,
+            user.id,
+        )
+        result = []
+        for org in orgs:
+            campaigns = await conn.fetch(
+                """
+                SELECT campaign_id, title, url, status, category,
+                       funding_goal_cents, amount_raised_cents, backers, time_created
+                FROM campaigns
+                WHERE creator_id = $1
+                ORDER BY time_created DESC
+                """,
+                org["creator_id"],
+            )
+            result.append({
+                "organization_id": org["creator_id"],
+                "name": org["name"] or "",
+                "bio": org["bio"] or "",
+                "campaigns": [dict(c) for c in campaigns],
+            })
+        return result
+
+
 # ── Drafts ─────────────────────────────────────────────────────────────────
 
 @router.get("/my-drafts")
 async def my_drafts(user: User = Depends(get_current_user)):
     """List all draft campaigns for the authenticated user."""
     try:
-        return await db.list_draft_campaigns(user.id)
+        return await db_mod.list_draft_campaigns(user.id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -195,7 +230,7 @@ async def save_draft(data: dict, user: User = Depends(get_current_user)):
     """Create or update a draft campaign."""
     data["creator_id"] = user.id
     try:
-        return await db.upsert_draft_campaign(data)
+        return await db_mod.upsert_draft_campaign(data)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -223,7 +258,7 @@ async def replace_draft_photos(
 @router.delete("/drafts/{campaign_id}")
 async def delete_draft(campaign_id: int, user: User = Depends(get_current_user)):
     """Hard-delete a draft campaign and its related data."""
-    pool = await db.get_pool()
+    pool = await db_mod.get_pool()
     async with pool.acquire() as conn:
         # Verify it's a draft owned by this user
         row = await conn.fetchrow(
@@ -250,7 +285,7 @@ async def delete_draft(campaign_id: int, user: User = Depends(get_current_user))
 @router.get("/drafts/{campaign_id}")
 async def get_draft(campaign_id: int, user: User = Depends(get_current_user)):
     """Get a single draft campaign with all related data."""
-    result = await db.get_draft_campaign(campaign_id, user.id)
+    result = await db_mod.get_draft_campaign(campaign_id, user.id)
     if not result:
         raise HTTPException(status_code=404, detail="Draft not found")
     return result
@@ -264,7 +299,7 @@ async def finalize_campaign(data: dict):
     Submit create-project draft and write campaigns/faqs/rewards/collaborators.
     """
     try:
-        return await db.finalize_campaign(data)
+        return await db_mod.finalize_campaign(data)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
