@@ -245,7 +245,7 @@ async def replace_draft_photos(
 ):
     """Persist campaign_photos after files are stored in S3."""
     try:
-        await db.replace_campaign_photos(
+        await db_mod.replace_campaign_photos(
             campaign_id, user.id, data.get("photos") or []
         )
         return {"ok": True, "campaign_id": campaign_id}

@@ -274,6 +274,94 @@ async def replace_campaign_photos(
             await replace_campaign_photos_conn(conn, campaign_id, creator_id, photos)
 
 
+async def _upsert_bank_details_encrypted(
+    conn: asyncpg.Connection,
+    campaign_id: int,
+    creator_id: str,
+    payment: dict[str, Any],
+) -> None:
+    """
+    Store one row per campaign in public.bank_details.
+    The Fernet ciphertext (JSON blob) is stored in column fermat_key.
+    Plaintext account_type is stored for simple filtering.
+    """
+    from app.bank_crypto import encrypt_bank_payload
+
+    row = await conn.fetchrow(
+        "SELECT creator_id FROM public.campaigns WHERE campaign_id = $1",
+        campaign_id,
+    )
+    if not row or str(row["creator_id"]) != str(creator_id):
+        raise ValueError("Campaign not found or not owned by this user")
+
+    routing = str(payment.get("routing_number") or "").strip()
+    account = str(payment.get("account_number") or "").strip()
+    if not routing or not account:
+        return
+
+    holder = str(payment.get("account_holder_name") or "").strip()
+    acct_type = str(payment.get("account_type") or "individual").strip()
+    if acct_type not in ("individual", "business"):
+        acct_type = "individual"
+    contact_email = str(payment.get("contact_email") or "").strip()
+
+    payload = {
+        "routing_number": routing,
+        "account_number": account,
+        "account_holder_name": holder,
+        "account_type": acct_type,
+        "contact_email": contact_email,
+    }
+    token = encrypt_bank_payload(payload)
+
+    await conn.execute(
+        "DELETE FROM public.bank_details WHERE campaign_id = $1",
+        campaign_id,
+    )
+    try:
+        await conn.execute(
+            """
+            INSERT INTO public.bank_details (campaign_id, fermat_key, account_type)
+            VALUES ($1, $2, $3)
+            """,
+            campaign_id,
+            token,
+            acct_type,
+        )
+    except Exception as e:
+        err = str(e).lower()
+        if "too long" in err or "character varying" in err:
+            raise ValueError(
+                "Database column fermat_key (or routing_number before migration) is too short "
+                "for encrypted bank data (must be TEXT). Run "
+                "backend/db/migrations/001_bank_details_ciphertext.sql if needed, then "
+                "002_bank_details_drop_account_rename_routing.sql, then retry."
+            ) from e
+        raise
+
+
+async def get_bank_details_decrypted(campaign_id: int) -> dict[str, Any] | None:
+    """
+    Decrypt stored bank details for payouts or admin (requires BANK_ENCRYPTION_KEY).
+    Returns None if no row or empty token.
+    """
+    from app.bank_crypto import decrypt_bank_payload
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT fermat_key
+            FROM public.bank_details
+            WHERE campaign_id = $1
+            """,
+            campaign_id,
+        )
+    if not row or not row["fermat_key"]:
+        return None
+    return decrypt_bank_payload(str(row["fermat_key"]))
+
+
 async def _ensure_creator_exists(conn: asyncpg.Connection, creator_id: str, bio: str | None) -> None:
     exists = await conn.fetchrow(
         "SELECT 1 FROM public.creators WHERE creator_id = $1 LIMIT 1",
@@ -470,6 +558,12 @@ async def finalize_campaign(data: dict[str, Any]) -> dict[str, Any]:
             if "photos" in data:
                 await replace_campaign_photos_conn(
                     conn, campaign_id, creator_id, data.get("photos") or []
+                )
+
+            payment = data.get("payment")
+            if payment and isinstance(payment, dict):
+                await _upsert_bank_details_encrypted(
+                    conn, campaign_id, creator_id, payment
                 )
 
     return {"campaign_id": row["campaign_id"], "slug": row["url"] or url}

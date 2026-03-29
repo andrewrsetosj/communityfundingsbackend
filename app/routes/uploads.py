@@ -19,6 +19,44 @@ AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 S3_KEY_PREFIX = (os.getenv("S3_KEY_PREFIX") or "Campaigns").strip().strip("/")
 
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
+MAX_VIDEO_BYTES = 100 * 1024 * 1024  # 100MB
+
+ALLOWED_IMAGE_TYPES = frozenset(
+    {"image/jpeg", "image/png", "image/webp", "image/gif"}
+)
+ALLOWED_VIDEO_TYPES = frozenset(
+    {
+        "video/mp4",
+        "video/webm",
+        "video/quicktime",  # .mov
+    }
+)
+ALLOWED_UPLOAD_TYPES = ALLOWED_IMAGE_TYPES | ALLOWED_VIDEO_TYPES
+
+
+def _max_bytes_for_type(content_type: str) -> int:
+    ct = (content_type or "").strip().lower()
+    if ct.startswith("video/"):
+        return MAX_VIDEO_BYTES
+    return MAX_IMAGE_BYTES
+
+
+def _extension_for_upload(content_type: str, filename: str) -> str:
+    ct = (content_type or "").strip().lower()
+    ext_map = {
+        "image/jpeg": "jpg",
+        "image/png": "png",
+        "image/webp": "webp",
+        "image/gif": "gif",
+        "video/mp4": "mp4",
+        "video/webm": "webm",
+        "video/quicktime": "mov",
+    }
+    if ct in ext_map:
+        return ext_map[ct]
+    if "." in (filename or ""):
+        return filename.rsplit(".", 1)[-1].lower()[:8] or "bin"
+    return "bin"
 
 
 def get_s3_client():
@@ -75,10 +113,9 @@ async def upload_campaign_file(
     file: UploadFile = File(...),
     user: User = Depends(get_current_user),
 ):
-    """Upload one image via API → S3 (avoids browser CORS to S3)."""
-    allowed_types = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+    """Upload one image or video via API → S3 (avoids browser CORS to S3)."""
     content_type = (file.content_type or "").strip() or "application/octet-stream"
-    if content_type not in allowed_types:
+    if content_type not in ALLOWED_UPLOAD_TYPES:
         raise HTTPException(
             status_code=400,
             detail=f"File type not allowed: {content_type}",
@@ -87,13 +124,16 @@ async def upload_campaign_file(
     await _assert_draft_owned(campaign_id, user.id)
 
     raw = await file.read()
-    if len(raw) > MAX_IMAGE_BYTES:
-        raise HTTPException(status_code=400, detail="File too large (max 12MB)")
+    max_bytes = _max_bytes_for_type(content_type)
+    if len(raw) > max_bytes:
+        mb = max_bytes // (1024 * 1024)
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large (max {mb}MB for this type)",
+        )
 
-    filename = file.filename or "image.jpg"
-    ext = filename.rsplit(".", 1)[-1] if "." in filename else "jpg"
-    if ext.lower() not in {"jpg", "jpeg", "png", "webp", "gif"}:
-        ext = "jpg"
+    filename = file.filename or "upload.jpg"
+    ext = _extension_for_upload(content_type, filename)
     key = _build_campaign_object_key(campaign_id, ext)
 
     try:
@@ -126,11 +166,10 @@ async def get_presigned_upload_url(
     user: User = Depends(get_current_user),
 ):
     """Optional: presigned PUT for direct browser → S3 (requires S3 CORS)."""
-    allowed_types = {"image/jpeg", "image/png", "image/webp", "image/gif"}
-    if content_type not in allowed_types:
+    if content_type not in ALLOWED_UPLOAD_TYPES:
         raise HTTPException(status_code=400, detail=f"File type {content_type} not allowed")
 
-    ext = filename.rsplit(".", 1)[-1] if "." in filename else "jpg"
+    ext = _extension_for_upload(content_type, filename)
     key = f"campaigns/{user.id}/{uuid.uuid4().hex}.{ext}"
 
     try:
