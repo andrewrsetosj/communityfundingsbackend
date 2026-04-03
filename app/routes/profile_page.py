@@ -17,6 +17,7 @@ async def get_profile_page(creator_id: str):
                 name,
                 last_name,
                 bio,
+                website,
                 time_creation
             FROM creators
             WHERE creator_id = $1
@@ -28,6 +29,19 @@ async def get_profile_page(creator_id: str):
             raise HTTPException(status_code=404, detail="Profile not found")
 
         creator = dict(creator)
+
+        interests = await conn.fetch(
+            """
+            SELECT i.name
+            FROM creator_interests ci
+            JOIN interests i
+              ON i.interest_id = ci.interest_id
+            WHERE ci.creator_id = $1
+            ORDER BY i.name ASC
+            """,
+            creator_id,
+        )
+        interests = [row["name"] for row in interests]
 
         campaigns = await conn.fetch(
             """
@@ -81,5 +95,6 @@ async def get_profile_page(creator_id: str):
 
     return {
         "creator": creator,
+        "interests": interests,
         "campaigns": campaigns,
     }
