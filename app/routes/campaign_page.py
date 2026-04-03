@@ -2,9 +2,10 @@ from fastapi import APIRouter, HTTPException
 from app.db import get_pool
 
 router = APIRouter(prefix="/api/campaign-page", tags=["campaign-page"])
-        
-@router.get("/{campaign_id}")
-async def get_campaign_page(campaign_id: str):
+
+
+@router.get("/{campaign_url}")
+async def get_campaign_page(campaign_url: str):
     """
     Campaign details endpoint that accepts either an integer ID or a slug.
     """
@@ -13,16 +14,27 @@ async def get_campaign_page(campaign_id: str):
     async with pool.acquire() as conn:
         # 1) Campaign — try by integer ID first, then by slug
         campaign = None
-        if campaign_id.isdigit():
+
+        if campaign_url.isdigit():
             campaign = await conn.fetchrow(
-                "SELECT * FROM campaigns WHERE campaign_id = $1",
-                int(campaign_id),
+                """
+                SELECT *
+                FROM campaigns
+                WHERE campaign_id = $1
+                """,
+                int(campaign_url),
             )
+
         if not campaign:
             campaign = await conn.fetchrow(
-                "SELECT * FROM campaigns WHERE url = $1",
-                campaign_id,
+                """
+                SELECT *
+                FROM campaigns
+                WHERE url = $1
+                """,
+                campaign_url,
             )
+
         if not campaign:
             raise HTTPException(status_code=404, detail="Campaign not found")
 
@@ -82,7 +94,7 @@ async def get_campaign_page(campaign_id: str):
                 f"{p['s3_key']}"
             )
 
-        # 6) Comments (join creators so frontend can show commenter name)
+        # 6) Comments
         comments = await conn.fetch(
             """
             SELECT
