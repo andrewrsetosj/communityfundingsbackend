@@ -85,8 +85,8 @@ async def get_follow_relationship(
         {"viewer": current_user.id, "target": creator_id},
     )
 
-    is_following_val = is_following_result.scalar()
-    follows_you_val = follows_you_result.scalar()
+    is_following_val = bool(is_following_result.scalar())
+    follows_you_val = bool(follows_you_result.scalar())
 
     return {
         "viewer_creator_id": current_user.id,
@@ -94,6 +94,130 @@ async def get_follow_relationship(
         "is_following": is_following_val,
         "follows_you": follows_you_val,
         "is_friend": is_following_val and follows_you_val,
+    }
+
+
+# ─────────────────────────────────────────
+# FOLLOWERS LIST
+# ─────────────────────────────────────────
+@router.get("/{creator_id}/followers")
+async def get_followers(
+    creator_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    creator = await db.get(User, creator_id)
+    if not creator:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    result = await db.execute(
+        text("""
+            SELECT
+                c.creator_id,
+                c.name,
+                c.last_name,
+                c.user_type,
+                EXISTS(
+                    SELECT 1
+                    FROM creator_follows cf2
+                    WHERE cf2.follower_creator_id = :viewer_id
+                      AND cf2.followed_creator_id = c.creator_id
+                ) AS viewer_follows_them,
+                EXISTS(
+                    SELECT 1
+                    FROM creator_follows cf3
+                    WHERE cf3.follower_creator_id = c.creator_id
+                      AND cf3.followed_creator_id = :viewer_id
+                ) AS they_follow_viewer
+            FROM creator_follows cf
+            JOIN creators c
+              ON c.creator_id = cf.follower_creator_id
+            WHERE cf.followed_creator_id = :creator_id
+            ORDER BY c.name ASC, c.last_name ASC, c.creator_id ASC
+        """),
+        {"creator_id": creator_id, "viewer_id": current_user.id},
+    )
+
+    followers = []
+    for row in result.mappings():
+        viewer_follows_them = bool(row["viewer_follows_them"])
+        they_follow_viewer = bool(row["they_follow_viewer"])
+
+        followers.append({
+            "creator_id": row["creator_id"],
+            "name": row["name"],
+            "last_name": row["last_name"],
+            "user_type": row["user_type"],
+            "follows_you": they_follow_viewer,
+            "is_friend": viewer_follows_them and they_follow_viewer,
+            "is_you": row["creator_id"] == current_user.id,
+        })
+
+    return {
+        "creator_id": creator_id,
+        "followers": followers,
+    }
+
+
+# ─────────────────────────────────────────
+# FOLLOWING LIST
+# ─────────────────────────────────────────
+@router.get("/{creator_id}/following")
+async def get_following(
+    creator_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    creator = await db.get(User, creator_id)
+    if not creator:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    result = await db.execute(
+        text("""
+            SELECT
+                c.creator_id,
+                c.name,
+                c.last_name,
+                c.user_type,
+                EXISTS(
+                    SELECT 1
+                    FROM creator_follows cf2
+                    WHERE cf2.follower_creator_id = :viewer_id
+                      AND cf2.followed_creator_id = c.creator_id
+                ) AS viewer_follows_them,
+                EXISTS(
+                    SELECT 1
+                    FROM creator_follows cf3
+                    WHERE cf3.follower_creator_id = c.creator_id
+                      AND cf3.followed_creator_id = :viewer_id
+                ) AS they_follow_viewer
+            FROM creator_follows cf
+            JOIN creators c
+              ON c.creator_id = cf.followed_creator_id
+            WHERE cf.follower_creator_id = :creator_id
+            ORDER BY c.name ASC, c.last_name ASC, c.creator_id ASC
+        """),
+        {"creator_id": creator_id, "viewer_id": current_user.id},
+    )
+
+    following = []
+    for row in result.mappings():
+        viewer_follows_them = bool(row["viewer_follows_them"])
+        they_follow_viewer = bool(row["they_follow_viewer"])
+
+        following.append({
+            "creator_id": row["creator_id"],
+            "name": row["name"],
+            "last_name": row["last_name"],
+            "user_type": row["user_type"],
+            "follows_you": they_follow_viewer,
+            "is_friend": viewer_follows_them and they_follow_viewer,
+            "is_you": row["creator_id"] == current_user.id,
+        })
+
+    return {
+        "creator_id": creator_id,
+        "following": following,
     }
 
 
