@@ -429,6 +429,7 @@ async def finalize_campaign(data: dict[str, Any]) -> dict[str, Any]:
 
     url = _slug(data.get("vanity_slug") or title) or _slug(title)
     existing_campaign_id = data.get("campaign_id")
+    collaborator_invite_emails: list[str] = []
 
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -498,6 +499,17 @@ async def finalize_campaign(data: dict[str, Any]) -> dict[str, Any]:
             # Delete + re-insert related rows
             await conn.execute("DELETE FROM public.faqs WHERE campaign_id = $1", campaign_id)
             await conn.execute("DELETE FROM public.rewards WHERE campaign_id = $1", campaign_id)
+
+            prev_collab = await conn.fetch(
+                """
+                SELECT lower(trim(email)) AS email
+                FROM public.collaborators
+                WHERE campaign_id = $1
+                """,
+                campaign_id,
+            )
+            previous_collab_emails = {r["email"] for r in prev_collab if r.get("email")}
+
             await conn.execute("DELETE FROM public.collaborators WHERE campaign_id = $1", campaign_id)
 
             # FAQs
@@ -555,6 +567,8 @@ async def finalize_campaign(data: dict[str, Any]) -> dict[str, Any]:
                     collaborator_rows,
                 )
 
+            collaborator_invite_emails = list(seen_emails - previous_collab_emails)
+
             if "photos" in data:
                 await replace_campaign_photos_conn(
                     conn, campaign_id, creator_id, data.get("photos") or []
@@ -565,6 +579,13 @@ async def finalize_campaign(data: dict[str, Any]) -> dict[str, Any]:
                 await _upsert_bank_details_encrypted(
                     conn, campaign_id, creator_id, payment
                 )
+
+    if collaborator_invite_emails:
+        from app.collaborator_invites import send_collaborator_invite_emails
+
+        await send_collaborator_invite_emails(
+            collaborator_invite_emails, title, campaign_id, creator_id
+        )
 
     return {"campaign_id": row["campaign_id"], "slug": row["url"] or url}
 
@@ -594,6 +615,7 @@ async def upsert_draft_campaign(data: dict[str, Any]) -> dict[str, Any]:
     duration_days_val = int(duration_days) if duration_days else None
     bio = (data.get("bio") or "").strip() or None
     campaign_id = data.get("campaign_id")
+    collaborator_invite_emails: list[str] = []
 
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -647,6 +669,17 @@ async def upsert_draft_campaign(data: dict[str, Any]) -> dict[str, Any]:
             # Delete + re-insert related rows
             await conn.execute("DELETE FROM public.faqs WHERE campaign_id = $1", campaign_id)
             await conn.execute("DELETE FROM public.rewards WHERE campaign_id = $1", campaign_id)
+
+            prev_collab = await conn.fetch(
+                """
+                SELECT lower(trim(email)) AS email
+                FROM public.collaborators
+                WHERE campaign_id = $1
+                """,
+                campaign_id,
+            )
+            previous_collab_emails = {r["email"] for r in prev_collab if r.get("email")}
+
             await conn.execute("DELETE FROM public.collaborators WHERE campaign_id = $1", campaign_id)
 
             # FAQs
@@ -703,6 +736,15 @@ async def upsert_draft_campaign(data: dict[str, Any]) -> dict[str, Any]:
                     "INSERT INTO public.collaborators (campaign_id, email, status) VALUES ($1, $2, $3)",
                     collaborator_rows,
                 )
+
+            collaborator_invite_emails = list(seen_emails - previous_collab_emails)
+
+    if collaborator_invite_emails:
+        from app.collaborator_invites import send_collaborator_invite_emails
+
+        await send_collaborator_invite_emails(
+            collaborator_invite_emails, title, campaign_id, creator_id
+        )
 
     return {"campaign_id": campaign_id, "slug": row["url"] or url}
 
