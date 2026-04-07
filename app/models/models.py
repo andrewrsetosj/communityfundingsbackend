@@ -88,6 +88,7 @@ class User(Base):
     user_type = Column(Integer, default=0, server_default="0")
     bio = Column(Text, nullable=True)
     avatar_url = Column(Text, nullable=True)
+    website = Column(String(500), nullable=True)
     hashed_password = Column(String(255), nullable=True)
     phone_number = Column(String(50), nullable=True)
     address = Column(String(500), nullable=True)

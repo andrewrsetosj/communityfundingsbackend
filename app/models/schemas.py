@@ -49,6 +49,7 @@ class UserUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     last_name: Optional[str] = None
     bio: Optional[str] = None
+    website: Optional[str] = None
 
 
 class UserResponse(BaseModel):
@@ -62,6 +63,7 @@ class UserResponse(BaseModel):
     address: Optional[str] = None
     state: Optional[str] = None
     time_zone: Optional[str] = None
+    website: Optional[str] = None
     created_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
@@ -78,6 +80,7 @@ class UserPublicResponse(BaseModel):
     address: Optional[str] = None
     state: Optional[str] = None
     time_zone: Optional[str] = None
+    website: Optional[str] = None
     created_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
@@ -92,6 +95,7 @@ class UserProfileUpdate(BaseModel):
     address: Optional[str] = None
     state: Optional[str] = None
     time_zone: Optional[str] = None
+    website: Optional[str] = None
 
 
 # ════════════════════════════════════════════════════════════════════════════
