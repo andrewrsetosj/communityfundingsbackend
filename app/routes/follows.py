@@ -117,6 +117,7 @@ async def get_followers(
                 c.name,
                 c.last_name,
                 c.user_type,
+                c.avatar_url,
                 EXISTS(
                     SELECT 1
                     FROM creator_follows cf2
@@ -148,6 +149,7 @@ async def get_followers(
             "name": row["name"],
             "last_name": row["last_name"],
             "user_type": row["user_type"],
+            "avatar_url": row["avatar_url"],
             "follows_you": they_follow_viewer,
             "is_friend": viewer_follows_them and they_follow_viewer,
             "is_you": row["creator_id"] == current_user.id,
@@ -179,6 +181,7 @@ async def get_following(
                 c.name,
                 c.last_name,
                 c.user_type,
+                c.avatar_url,
                 EXISTS(
                     SELECT 1
                     FROM creator_follows cf2
@@ -210,6 +213,7 @@ async def get_following(
             "name": row["name"],
             "last_name": row["last_name"],
             "user_type": row["user_type"],
+            "avatar_url": row["avatar_url"],
             "follows_you": they_follow_viewer,
             "is_friend": viewer_follows_them and they_follow_viewer,
             "is_you": row["creator_id"] == current_user.id,

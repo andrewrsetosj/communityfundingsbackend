@@ -124,7 +124,7 @@ async def get_campaign_page(
 
         creator = await conn.fetchrow(
             """
-            SELECT *
+            SELECT creator_id, name, last_name, email, bio, avatar_url
             FROM creators
             WHERE creator_id = $1
             """,
@@ -197,7 +197,8 @@ async def get_campaign_page(
                 c.parent_comment_id,
                 c.time_created,
                 cr.name,
-                cr.last_name
+                cr.last_name,
+                cr.avatar_url
             FROM comments c
             LEFT JOIN creators cr ON cr.creator_id = c.creator_id
             WHERE c.campaign_id = $1
@@ -249,6 +250,7 @@ async def get_campaign_page(
                         c.time_created,
                         cr.name,
                         cr.last_name,
+                        cr.avatar_url,
                         ROW_NUMBER() OVER (
                             PARTITION BY c.parent_comment_id
                             ORDER BY c.time_created ASC, c.comment_id ASC
@@ -344,7 +346,8 @@ async def get_comment_replies(
                 c.parent_comment_id,
                 c.time_created,
                 cr.name,
-                cr.last_name
+                cr.last_name,
+                cr.avatar_url
             FROM comments c
             LEFT JOIN creators cr ON cr.creator_id = c.creator_id
             WHERE c.parent_comment_id = $1
@@ -420,7 +423,7 @@ async def create_comment(
 
         creator_row = await conn.fetchrow(
             """
-            SELECT name, last_name
+            SELECT name, last_name, avatar_url
             FROM creators
             WHERE creator_id = $1
             """,
@@ -433,6 +436,7 @@ async def create_comment(
         **inserted,
         "name": creator_row["name"] if creator_row else None,
         "last_name": creator_row["last_name"] if creator_row else None,
+        "avatar_url": creator_row["avatar_url"] if creator_row else None,
         "replies": [],
         "reply_count": 0,
         "has_more_replies": False,

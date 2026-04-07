@@ -18,6 +18,7 @@ async def get_profile_page(creator_id: str):
                 last_name,
                 bio,
                 website,
+                avatar_url,
                 time_creation
             FROM creators
             WHERE creator_id = $1
