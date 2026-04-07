@@ -5,6 +5,8 @@ Auth routes — register, login, profile, password change
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
+from pydantic import BaseModel
+from typing import Optional
 
 from app.database import get_db
 from app.auth import hash_password, verify_password, create_access_token, get_current_user
@@ -36,8 +38,13 @@ async def register(data: RegisterRequest, db: AsyncSession = Depends(get_db)):
     return TokenResponse(
         access_token=token,
         user=UserResponse(
-            id=user.id, email=user.email, name=user.name,
-            email_verified=False, stripe_connect_onboarded=False,
+            id=user.id,
+            email=user.email,
+            name=user.name,
+            avatar_url=user.avatar_url,
+            bio=user.bio,
+            email_verified=user.email_verified,
+            stripe_connect_onboarded=user.stripe_connect_onboarded,
             created_at=user.created_at,
         ),
     )
@@ -53,11 +60,15 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     token = create_access_token(user.id)
+
     return TokenResponse(
         access_token=token,
         user=UserResponse(
-            id=user.id, email=user.email, name=user.name,
-            avatar_url=user.avatar_url, bio=user.bio,
+            id=user.id,
+            email=user.email,
+            name=user.name,
+            avatar_url=user.avatar_url,
+            bio=user.bio,
             email_verified=user.email_verified,
             stripe_connect_onboarded=user.stripe_connect_onboarded,
             created_at=user.created_at,
@@ -69,12 +80,16 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
 async def get_me(user: User = Depends(get_current_user)):
     """Get current authenticated user profile."""
     return UserResponse(
-        id=user.id, email=user.email, name=user.name,
-        avatar_url=user.avatar_url, bio=user.bio,
+        id=user.id,
+        email=user.email,
+        name=user.name,
+        avatar_url=user.avatar_url,
+        bio=user.bio,
         email_verified=user.email_verified,
         stripe_connect_onboarded=user.stripe_connect_onboarded,
         created_at=user.created_at,
     )
+
 
 @router.put("/me", response_model=UserResponse)
 async def update_me(
@@ -89,11 +104,15 @@ async def update_me(
         user.bio = data.bio
     if data.avatar_url is not None:
         user.avatar_url = data.avatar_url
+
     await db.flush()
 
     return UserResponse(
-        id=user.id, email=user.email, name=user.name,
-        avatar_url=user.avatar_url, bio=user.bio,
+        id=user.id,
+        email=user.email,
+        name=user.name,
+        avatar_url=user.avatar_url,
+        bio=user.bio,
         email_verified=user.email_verified,
         stripe_connect_onboarded=user.stripe_connect_onboarded,
         created_at=user.created_at,
@@ -109,45 +128,50 @@ async def change_password(
     """Change the authenticated user's password."""
     if not verify_password(data.current_password, user.hashed_password):
         raise HTTPException(status_code=400, detail="Current password is incorrect")
+
     user.hashed_password = hash_password(data.new_password)
     await db.flush()
-    return {"message": "Password updated"}
-    
-from pydantic import BaseModel as PydanticBaseModel
 
-class ClerkSyncRequest(PydanticBaseModel):
+    return {"message": "Password updated"}
+
+
+class ClerkSyncRequest(BaseModel):
     clerk_id: str
-    email: str
-    name: str
+    email: Optional[str] = None
+    name: Optional[str] = None
+    image_url: Optional[str] = None
 
 
 @router.post("/clerk-sync")
 async def clerk_sync(data: ClerkSyncRequest, db: AsyncSession = Depends(get_db)):
     """Bridge Clerk frontend auth → backend JWT. Creates user if needed."""
     import traceback
-    try:
-        print(f"[clerk-sync] clerk_id={data.clerk_id}, email={data.email}, name={data.name}")
 
-        # Look up by Clerk ID first, then fall back to email
+    try:
+        print(
+            f"[clerk-sync] clerk_id={data.clerk_id}, "
+            f"email={data.email}, name={data.name}, image_url={data.image_url}"
+        )
+
+        # Look up by Clerk ID first
         result = await db.execute(select(User).where(User.id == data.clerk_id))
         user = result.scalar_one_or_none()
         print(f"[clerk-sync] lookup by clerk_id: {'found' if user else 'not found'}")
 
         if not user:
-            # Check if there's an existing row by email (from before clerk_id was stored)
+            # Fall back to email if a pre-existing row exists
             result = await db.execute(select(User).where(User.email == data.email))
             user = result.scalar_one_or_none()
             print(f"[clerk-sync] lookup by email: {'found id=' + str(user.id) if user else 'not found'}")
 
             if user:
-                # Update the existing row's creator_id to the Clerk ID via raw SQL
                 old_id = user.id
                 await db.execute(
                     text("UPDATE creators SET creator_id = :new_id WHERE creator_id = :old_id"),
                     {"new_id": data.clerk_id, "old_id": old_id},
                 )
                 await db.flush()
-                # Re-fetch with the new ID
+
                 result = await db.execute(select(User).where(User.id == data.clerk_id))
                 user = result.scalar_one_or_none()
                 print(f"[clerk-sync] after PK update: {'found' if user else 'NOT FOUND'}")
@@ -156,11 +180,21 @@ async def clerk_sync(data: ClerkSyncRequest, db: AsyncSession = Depends(get_db))
                     id=data.clerk_id,
                     email=data.email,
                     name=data.name,
-                    hashed_password=hash_password(f"clerk_synced_{data.email}"),
+                    hashed_password=hash_password(f"clerk_synced_{data.email or data.clerk_id}"),
                 )
                 db.add(user)
                 await db.flush()
                 print(f"[clerk-sync] created new user id={user.id}")
+
+        # Keep backend user info updated from Clerk
+
+        if data.email:
+            user.email = data.email
+
+        if data.image_url:
+            user.avatar_url = data.image_url
+
+        await db.flush()
 
         token = create_access_token(user.id)
         print(f"[clerk-sync] success, returning token for user={user.id}")
