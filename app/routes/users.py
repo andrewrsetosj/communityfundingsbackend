@@ -37,6 +37,7 @@ async def get_user_public(user_id: str, db: AsyncSession = Depends(get_db)):
         address=user.address,
         state=user.state,
         time_zone=user.time_zone,
+        website=user.website,
         created_at=user.created_at,
     )
 
@@ -71,6 +72,7 @@ async def update_user_profile(
         address=user.address,
         state=user.state,
         time_zone=user.time_zone,
+        website=user.website,
         created_at=user.created_at,
     )
 
