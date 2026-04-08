@@ -50,11 +50,13 @@ class UserUpdate(BaseModel):
     last_name: Optional[str] = None
     bio: Optional[str] = None
     website: Optional[str] = None
+    username: Optional[str] = None
 
 
 class UserResponse(BaseModel):
     id: str
     email: Optional[str] = None
+    username: Optional[str] = None
     name: Optional[str] = None
     last_name: Optional[str] = None
     user_type: Optional[int] = None
@@ -74,6 +76,7 @@ class UserPublicResponse(BaseModel):
     id: str
     name: Optional[str] = None
     last_name: Optional[str] = None
+    username: Optional[str] = None
     email: Optional[str] = None
     bio: Optional[str] = None
     phone_number: Optional[str] = None
@@ -90,6 +93,7 @@ class UserProfileUpdate(BaseModel):
     """Fields the user can update on their profile."""
     name: Optional[str] = None
     last_name: Optional[str] = None
+    username: Optional[str] = Field(None, min_length=3, max_length=30)
     bio: Optional[str] = None
     phone_number: Optional[str] = None
     address: Optional[str] = None

@@ -157,6 +157,7 @@ async def _fetch_comment_payload(conn, comment_id: int, viewer_id: str | None, c
             c.reply_to_comment_id,
             c.time_created,
             c.updated_at,
+            COALESCE(NULLIF(cr.username, ''), cr.creator_id) AS username,
             cr.name,
             cr.last_name,
             cr.avatar_url,
@@ -218,7 +219,7 @@ async def get_campaign_page(
 
         creator = await conn.fetchrow(
             """
-            SELECT creator_id, name, last_name, email, bio, avatar_url, user_type
+            SELECT creator_id, COALESCE(NULLIF(username, ''), creator_id) AS username, name, last_name, email, bio, avatar_url, user_type
             FROM creators
             WHERE creator_id = $1
             """,
@@ -295,6 +296,7 @@ async def get_campaign_page(
                 c.reply_to_comment_id,
                 c.time_created,
                 c.updated_at,
+                COALESCE(NULLIF(cr.username, ''), cr.creator_id) AS username,
                 cr.name,
                 cr.last_name,
                 cr.avatar_url,
@@ -368,6 +370,7 @@ async def get_campaign_page(
                         c.reply_to_comment_id,
                         c.time_created,
                         c.updated_at,
+                        COALESCE(NULLIF(cr.username, ''), cr.creator_id) AS username,
                         cr.name,
                         cr.last_name,
                         cr.avatar_url,
@@ -485,6 +488,7 @@ async def get_comment_replies(
                 c.reply_to_comment_id,
                 c.time_created,
                 c.updated_at,
+                COALESCE(NULLIF(cr.username, ''), cr.creator_id) AS username,
                 cr.name,
                 cr.last_name,
                 cr.avatar_url,

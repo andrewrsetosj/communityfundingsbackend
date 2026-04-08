@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Literal
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -17,11 +15,12 @@ class ReportProfileRequest(BaseModel):
     notes: str | None = Field(default=None, max_length=2000)
 
 
-async def _get_creator_profile(conn, creator_id: str) -> dict | None:
+async def _get_creator_profile(conn, creator_id_or_username: str) -> dict | None:
     creator = await conn.fetchrow(
         """
         SELECT
             creator_id,
+            COALESCE(NULLIF(username, ''), creator_id) AS username,
             user_type,
             name,
             last_name,
@@ -31,21 +30,24 @@ async def _get_creator_profile(conn, creator_id: str) -> dict | None:
             time_creation
         FROM creators
         WHERE creator_id = $1
+           OR LOWER(COALESCE(username, '')) = LOWER($1)
+        LIMIT 1
         """,
-        creator_id,
+        creator_id_or_username,
     )
-
     return dict(creator) if creator else None
 
 
-@router.get("/{creator_id}")
-async def get_profile_page(creator_id: str):
+@router.get("/{creator_id_or_username}")
+async def get_profile_page(creator_id_or_username: str):
     pool = await get_pool()
 
     async with pool.acquire() as conn:
-        creator = await _get_creator_profile(conn, creator_id)
+        creator = await _get_creator_profile(conn, creator_id_or_username)
         if not creator:
             raise HTTPException(status_code=404, detail="Profile not found")
+
+        creator_id = creator["creator_id"]
 
         interests = await conn.fetch(
             """
@@ -99,87 +101,80 @@ async def get_profile_page(creator_id: str):
             """,
             creator_id,
         )
-
         campaigns = [dict(c) for c in campaigns]
         for campaign in campaigns:
             if campaign.get("s3_bucket") and campaign.get("s3_key"):
-                campaign["image_url"] = (
-                    f"https://{campaign['s3_bucket']}.s3.us-east-2.amazonaws.com/"
-                    f"{campaign['s3_key']}"
-                )
+                campaign["image_url"] = f"https://{campaign['s3_bucket']}.s3.us-east-2.amazonaws.com/{campaign['s3_key']}"
             else:
                 campaign["image_url"] = None
 
         activity_rows = await conn.fetch(
-    """
-    SELECT *
-    FROM (
-        -- Comments
-        SELECT
-            'commented'::text AS activity_type,
-            c.time_created AS activity_time,
-            c.comment_id,
-            c.comment_text AS activity_text,
-            c.campaign_id,
-            camp.url AS campaign_url,
-            camp.title AS campaign_title,
-            NULL::text AS target_creator_id,
-            NULL::text AS target_name,
-            NULL::text AS target_last_name
-        FROM comments c
-        JOIN campaigns camp
-          ON camp.campaign_id = c.campaign_id
-        WHERE c.creator_id = $1
+            """
+            SELECT *
+            FROM (
+                SELECT
+                    'commented'::text AS activity_type,
+                    c.time_created AS activity_time,
+                    c.comment_id,
+                    c.comment_text AS activity_text,
+                    camp.campaign_id,
+                    camp.url AS campaign_url,
+                    camp.title AS campaign_title,
+                    NULL::text AS target_creator_id,
+                    NULL::text AS target_name,
+                    NULL::text AS target_last_name,
+                    NULL::text AS target_username
+                FROM comments c
+                JOIN campaigns camp
+                  ON camp.campaign_id = c.campaign_id
+                WHERE c.creator_id = $1
 
-        UNION ALL
+                UNION ALL
 
-        -- Follows
-        SELECT
-            'followed'::text AS activity_type,
-            cf.time_created AS activity_time,
-            NULL::bigint AS comment_id,
-            NULL::text AS activity_text,
-            NULL::bigint AS campaign_id,
-            NULL::text AS campaign_url,
-            NULL::text AS campaign_title,
-            cf.followed_creator_id AS target_creator_id,
-            cr.name AS target_name,
-            cr.last_name AS target_last_name
-        FROM creator_follows cf
-        JOIN creators cr
-          ON cr.creator_id = cf.followed_creator_id
-        WHERE cf.follower_creator_id = $1
+                SELECT
+                    'followed'::text AS activity_type,
+                    cf.time_created AS activity_time,
+                    NULL::bigint AS comment_id,
+                    NULL::text AS activity_text,
+                    NULL::bigint AS campaign_id,
+                    NULL::text AS campaign_url,
+                    NULL::text AS campaign_title,
+                    followed.creator_id AS target_creator_id,
+                    followed.name AS target_name,
+                    followed.last_name AS target_last_name,
+                    COALESCE(NULLIF(followed.username, ''), followed.creator_id) AS target_username
+                FROM creator_follows cf
+                JOIN creators followed
+                  ON followed.creator_id = cf.followed_creator_id
+                WHERE cf.follower_creator_id = $1
 
-        UNION ALL
+                UNION ALL
 
-        -- Campaigns created
-        SELECT
-            'created_campaign'::text AS activity_type,
-            c.time_created AS activity_time,
-            NULL::bigint AS comment_id,
-            NULL::text AS activity_text,
-            c.campaign_id,
-            c.url AS campaign_url,
-            c.title AS campaign_title,
-            NULL::text AS target_creator_id,
-            NULL::text AS target_name,
-            NULL::text AS target_last_name
-        FROM campaigns c
-        WHERE c.creator_id = $1
-    ) activity
-    ORDER BY activity_time DESC
-    LIMIT 10
-    """,
-    creator_id,
-)
+                SELECT
+                    'created_campaign'::text AS activity_type,
+                    camp.time_created AS activity_time,
+                    NULL::bigint AS comment_id,
+                    NULL::text AS activity_text,
+                    camp.campaign_id,
+                    camp.url AS campaign_url,
+                    camp.title AS campaign_title,
+                    NULL::text AS target_creator_id,
+                    NULL::text AS target_name,
+                    NULL::text AS target_last_name,
+                    NULL::text AS target_username
+                FROM campaigns camp
+                WHERE camp.creator_id = $1
+            ) activity
+            ORDER BY activity_time DESC
+            LIMIT 10
+            """,
+            creator_id,
+        )
 
         activities = []
         for row in activity_rows:
             item = dict(row)
-            if item.get("activity_text"):
-                item["activity_text_preview"] = item["activity_text"][:180]
-            else:
-                item["activity_text_preview"] = None
+            item["activity_text_preview"] = item["activity_text"][:180] if item.get("activity_text") else None
             activities.append(item)
 
     return {
@@ -189,32 +184,17 @@ async def get_profile_page(creator_id: str):
         "activities": activities,
     }
 
-@router.post("/{creator_id}/report")
+
+@router.post("/{creator_id_or_username}/report")
 async def report_profile(
-    creator_id: str,
+    creator_id_or_username: str,
     payload: ReportProfileRequest,
     current_user: User = Depends(get_current_user),
 ):
     pool = await get_pool()
 
     async with pool.acquire() as conn:
-        creator = await conn.fetchrow(
-            """
-            SELECT
-                creator_id,
-                user_type,
-                name,
-                last_name,
-                bio,
-                website,
-                avatar_url,
-                time_creation
-            FROM creators
-            WHERE creator_id = $1
-            """,
-            creator_id,
-        )
-
+        creator = await _get_creator_profile(conn, creator_id_or_username)
         if not creator:
             raise HTTPException(status_code=404, detail="Profile not found")
 
@@ -245,7 +225,7 @@ async def report_profile(
             creator["user_type"],
             creator["name"],
             creator["last_name"],
-            creator["creator_id"],
+            creator["username"],
             creator["bio"],
             creator["website"],
             creator["avatar_url"],
@@ -257,8 +237,8 @@ async def report_profile(
     return {
         "ok": True,
         "report_id": inserted["report_id"],
-        "creator_id": creator_id,
+        "creator_id": creator["creator_id"],
+        "username": creator["username"],
         "status": "open",
         "time_reported": inserted["time_reported"],
     }
-

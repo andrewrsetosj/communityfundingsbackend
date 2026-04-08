@@ -114,6 +114,7 @@ async def get_followers(
         text("""
             SELECT
                 c.creator_id,
+                COALESCE(NULLIF(c.username, ''), c.creator_id) AS username,
                 c.name,
                 c.last_name,
                 c.user_type,
@@ -146,6 +147,7 @@ async def get_followers(
 
         followers.append({
             "creator_id": row["creator_id"],
+            "username": row["username"],
             "name": row["name"],
             "last_name": row["last_name"],
             "user_type": row["user_type"],
@@ -178,6 +180,7 @@ async def get_following(
         text("""
             SELECT
                 c.creator_id,
+                COALESCE(NULLIF(c.username, ''), c.creator_id) AS username,
                 c.name,
                 c.last_name,
                 c.user_type,
@@ -210,6 +213,7 @@ async def get_following(
 
         following.append({
             "creator_id": row["creator_id"],
+            "username": row["username"],
             "name": row["name"],
             "last_name": row["last_name"],
             "user_type": row["user_type"],
