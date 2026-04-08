@@ -16,6 +16,24 @@ COMMENTS_PER_PAGE = 10
 INITIAL_REPLIES_LIMIT = 5
 COMMENT_MAX_LENGTH = 1000
 SORT_BY_VALUES = {"newest", "oldest", "most_liked"}
+MAX_DURATION_DAYS = 365
+CATEGORY_OPTIONS = {
+    "Art",
+    "Comics",
+    "Crafts",
+    "Dance",
+    "Design",
+    "Fashion",
+    "Film & Video",
+    "Food",
+    "Games",
+    "Journalism",
+    "Music",
+    "Photography",
+    "Publishing",
+    "Technology",
+    "Theater",
+}
 
 BANNED_WORD_PATTERNS = [
     r"\bfuck(?:ing|er|ed|s)?\b",
@@ -74,7 +92,7 @@ class EditCampaignRequest(BaseModel):
     category: str | None = None
     location: str | None = None
     funding_goal_cents: int = Field(..., ge=1)
-    duration_days: int | None = Field(default=None, ge=1)
+    duration_days: int | None = Field(default=None, ge=1, le=MAX_DURATION_DAYS)
     rewards: list[EditRewardRequest] = Field(default_factory=list)
     faqs: list[EditFaqRequest] = Field(default_factory=list)
     photos: list[EditPhotoRequest] = Field(default_factory=list)
@@ -133,6 +151,49 @@ def _contains_foul_language(text: str) -> bool:
     normalized = re.sub(r"\s+", " ", normalized).strip()
     return any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in BANNED_WORD_PATTERNS)
 
+
+def _validate_campaign_edit_payload(payload: EditCampaignRequest, existing_campaign: dict | None = None) -> None:
+    title = payload.title.strip()
+    description_html = payload.description_html.strip()
+    category = (payload.category or "").strip()
+    location = (payload.location or "").strip()
+
+    if not title:
+        raise HTTPException(status_code=400, detail="Project title is required")
+    if not description_html:
+        raise HTTPException(status_code=400, detail="Story / description is required")
+    if not category:
+        raise HTTPException(status_code=400, detail="Category is required")
+    if category not in CATEGORY_OPTIONS:
+        raise HTTPException(status_code=400, detail="Please choose a valid category")
+    if not location:
+        raise HTTPException(status_code=400, detail="Location is required")
+    if payload.funding_goal_cents < 1:
+        raise HTTPException(status_code=400, detail="Funding goal must be greater than 0")
+    if payload.duration_days is None:
+        raise HTTPException(status_code=400, detail="Duration is required")
+    if payload.duration_days < 1 or payload.duration_days > MAX_DURATION_DAYS:
+        raise HTTPException(status_code=400, detail=f"Duration must be between 1 and {MAX_DURATION_DAYS} days")
+
+    if existing_campaign and int(existing_campaign.get("backers") or 0) > 0:
+        locked_changes = []
+        if title != (existing_campaign.get("title") or "").strip():
+            locked_changes.append("title")
+        if category != (existing_campaign.get("category") or "").strip():
+            locked_changes.append("category")
+        if location != (existing_campaign.get("location") or "").strip():
+            locked_changes.append("location")
+        if int(payload.funding_goal_cents) != int(existing_campaign.get("funding_goal_cents") or 0):
+            locked_changes.append("funding goal")
+        existing_duration = existing_campaign.get("duration_days")
+        if payload.duration_days != existing_duration:
+            locked_changes.append("duration")
+
+        if locked_changes:
+            raise HTTPException(
+                status_code=400,
+                detail="Because backers have contributed to your campaign, you can no longer edit the title, category, location, funding goal, or duration.",
+            )
 
 def _validate_comment_text(comment_text: str) -> str:
     cleaned = comment_text.strip()
@@ -1063,7 +1124,7 @@ async def edit_campaign(
         raise HTTPException(status_code=404, detail="Campaign not found")
     if campaign["creator_id"] != current_user.id:
         raise HTTPException(status_code=403, detail="You can only edit your own campaign")
-
+    _validate_campaign_edit_payload(payload)
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -1117,6 +1178,7 @@ async def edit_campaign(
                 )
 
             await conn.execute("DELETE FROM campaign_photos WHERE campaign_id = $1", campaign["campaign_id"])
+            has_primary = any(photo.is_primary for photo in payload.photos)
             for idx, photo in enumerate(payload.photos):
                 await conn.execute(
                     """
@@ -1135,7 +1197,7 @@ async def edit_campaign(
                     photo.s3_bucket.strip(),
                     photo.s3_key.strip(),
                     photo.content_type.strip() if photo.content_type else "image/jpeg",
-                    idx == 0,
+                    photo.is_primary if has_primary else idx == 0,
                     idx,
                     current_user.id,
                 )
