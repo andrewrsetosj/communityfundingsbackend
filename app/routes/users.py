@@ -4,8 +4,9 @@ User routes — profiles, payment details, billing addresses
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func, or_
 from typing import List
+import re
 
 from app.database import get_db
 from app.auth import get_current_user
@@ -19,19 +20,59 @@ from app.models.schemas import (
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
+USERNAME_MIN_LENGTH = 3
+USERNAME_MAX_LENGTH = 30
+USERNAME_PATTERN = re.compile(r"^[a-z_]+$")
 
-# ── Public profile ─────────────────────────────────────────────────────────
 
-@router.get("/{user_id}", response_model=UserPublicResponse)
-async def get_user_public(user_id: str, db: AsyncSession = Depends(get_db)):
-    """Get a user's public profile (no email exposed)."""
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+BANNED_WORD_PATTERNS = [
+    r"\bfuck(?:ing|er|ed|s)?\b",
+    r"\bshit(?:ty|s)?\b",
+    r"\bbitch(?:es)?\b",
+    r"\basshole(?:s)?\b",
+    r"\bdamn\b",
+]
+
+
+def _normalize_for_profanity_check(value: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-zA-Z0-9\s]", " ", value.lower())).strip()
+
+
+def _contains_foul_language(value: str | None) -> bool:
+    if not value:
+        return False
+    normalized = _normalize_for_profanity_check(value)
+    return any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in BANNED_WORD_PATTERNS)
+
+
+def _validate_profile_text_field(value: str | None, field_label: str) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if cleaned and _contains_foul_language(cleaned):
+        raise HTTPException(status_code=400, detail=f"Please remove profanity from {field_label} and try again")
+    return cleaned
+
+
+def _normalize_website(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip().lower()
+    if not cleaned:
+        return ""
+    candidate = cleaned if cleaned.startswith(("http://", "https://")) else f"https://{cleaned}"
+    if not re.match(r"^https?://[a-z0-9.-]+\.[a-z]{2,}(/.*)?$", candidate):
+        raise HTTPException(status_code=400, detail="Website must be a valid link")
+    return cleaned
+
+
+def _public_user_response(user: User) -> UserPublicResponse:
     return UserPublicResponse(
-        id=user.id, name=user.name,
-        last_name=user.last_name, email=user.email,
+        id=user.id,
+        username=user.username or user.id,
+        name=user.name,
+        last_name=user.last_name,
+        email=user.email,
         bio=user.bio,
         phone_number=user.phone_number,
         address=user.address,
@@ -42,7 +83,46 @@ async def get_user_public(user_id: str, db: AsyncSession = Depends(get_db)):
     )
 
 
-# ── Update profile ────────────────────────────────────────────────────────
+async def _validate_username(db: AsyncSession, username: str, current_user_id: str) -> str:
+    candidate = username.strip().lower()
+    if not candidate:
+        return current_user_id
+    if _contains_foul_language(candidate):
+        raise HTTPException(status_code=400, detail="Please remove profanity from username and try again")
+    if " " in candidate:
+        raise HTTPException(status_code=400, detail="Username cannot contain spaces")
+    if len(candidate) < USERNAME_MIN_LENGTH or len(candidate) > USERNAME_MAX_LENGTH:
+        raise HTTPException(status_code=400, detail=f"Username must be between {USERNAME_MIN_LENGTH} and {USERNAME_MAX_LENGTH} characters")
+    if not USERNAME_PATTERN.fullmatch(candidate):
+        raise HTTPException(status_code=400, detail="Username can only contain lowercase letters and underscores.")
+    conflict_stmt = select(User.id).where(
+        User.id != current_user_id,
+        or_(
+            func.lower(User.username) == candidate.lower(),
+            func.lower(User.id) == candidate.lower(),
+        )
+    )
+    conflict = (await db.execute(conflict_stmt)).scalar_one_or_none()
+    if conflict:
+        raise HTTPException(status_code=409, detail="That username is already taken")
+    return candidate
+
+
+@router.get("/{user_id}", response_model=UserPublicResponse)
+async def get_user_public(user_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(User).where(
+            or_(User.id == user_id, func.lower(User.username) == user_id.lower())
+        )
+    )
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not user.username:
+        user.username = user.id
+        await db.flush()
+    return _public_user_response(user)
+
 
 @router.put("/{user_id}", response_model=UserPublicResponse)
 async def update_user_profile(
@@ -50,34 +130,46 @@ async def update_user_profile(
     data: UserProfileUpdate,
     db: AsyncSession = Depends(get_db),
 ):
-    """Update a user's profile fields. Creates the user if they don't exist."""
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
 
     if not user:
-        # Create the creator row on first save
-        user = User(id=user_id)
+        user = User(id=user_id, username=user_id)
         db.add(user)
+        await db.flush()
 
-    for field, value in data.model_dump(exclude_unset=True).items():
+    payload = data.model_dump(exclude_unset=True)
+
+    if "username" in payload and payload["username"] is not None:
+        user.username = await _validate_username(db, payload.pop("username"), user_id)
+    elif not user.username:
+        user.username = user.id
+
+    field_labels = {
+        "name": "first name",
+        "last_name": "last name",
+        "bio": "about you",
+        "phone_number": "contact number",
+        "address": "address",
+        "state": "state",
+        "time_zone": "time zone",
+    }
+
+    for field, label in field_labels.items():
+        if field in payload:
+            payload[field] = _validate_profile_text_field(payload[field], label)
+
+    if "website" in payload:
+        payload["website"] = _normalize_website(payload["website"])
+        if _contains_foul_language(payload["website"]):
+            raise HTTPException(status_code=400, detail="Please remove profanity from website and try again")
+
+    for field, value in payload.items():
         setattr(user, field, value)
 
     await db.flush()
+    return _public_user_response(user)
 
-    return UserPublicResponse(
-        id=user.id, name=user.name,
-        last_name=user.last_name, email=user.email,
-        bio=user.bio,
-        phone_number=user.phone_number,
-        address=user.address,
-        state=user.state,
-        time_zone=user.time_zone,
-        website=user.website,
-        created_at=user.created_at,
-    )
-
-
-# ── Payment Details ────────────────────────────────────────────────────────
 
 @router.post("/me/payment-details", response_model=PaymentDetailResponse)
 async def save_payment_details(
@@ -85,7 +177,6 @@ async def save_payment_details(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Save bank account details (only stores last 4 digits)."""
     detail = PaymentDetail(
         user_id=user.id,
         account_type=AccountType(data.account_type),
@@ -145,8 +236,6 @@ async def delete_payment_detail(
     return {"deleted": True}
 
 
-# ── Billing Address ────────────────────────────────────────────────────────
-
 @router.post("/me/billing-address", response_model=BillingAddressResponse)
 async def save_billing_address(
     data: BillingAddressCreate,
@@ -196,11 +285,8 @@ async def get_billing_addresses(
     ]
 
 
-# ── Interests ─────────────────────────────────────────────────────────────
-
 @router.get("/me/interests")
 async def get_my_interests(user: User = Depends(get_current_user)):
-    """Get the authenticated user's selected interests."""
     pool = await db_mod.get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -221,7 +307,6 @@ async def set_my_interests(
     data: dict,
     user: User = Depends(get_current_user),
 ):
-    """Replace the user's interests. Expects {"interest_names": ["Art", "Music", ...]}"""
     names = data.get("interest_names", [])
     if not isinstance(names, list):
         raise HTTPException(status_code=400, detail="interest_names must be a list")
@@ -229,12 +314,10 @@ async def set_my_interests(
     pool = await db_mod.get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Clear existing
             await conn.execute(
                 "DELETE FROM creator_interests WHERE creator_id = $1",
                 user.id,
             )
-            # Look up interest IDs by name and insert
             for name in names:
                 interest = await conn.fetchrow(
                     "SELECT interest_id FROM interests WHERE name = $1",
