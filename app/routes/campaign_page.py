@@ -1,11 +1,13 @@
-from fastapi import APIRouter, HTTPException, Depends, Query
-from pydantic import BaseModel, Field
-from sqlalchemy.ext.asyncio import AsyncSession
+from datetime import timedelta
 from math import ceil
+import re
+from typing import Literal
 
-from app.db import get_pool
-from app.database import get_db
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
+
 from app.auth import get_current_user
+from app.db import get_pool
 from app.models.models import User
 
 router = APIRouter(prefix="/api/campaign-page", tags=["campaign-page"])
@@ -13,11 +15,35 @@ router = APIRouter(prefix="/api/campaign-page", tags=["campaign-page"])
 COMMENTS_PER_PAGE = 10
 INITIAL_REPLIES_LIMIT = 5
 COMMENT_MAX_LENGTH = 1000
+SORT_BY_VALUES = {"newest", "oldest", "most_liked"}
+
+BANNED_WORD_PATTERNS = [
+    r"\bfuck(?:ing|er|ed|s)?\b",
+    r"\bshit(?:ty|s)?\b",
+    r"\bbitch(?:es)?\b",
+    r"\basshole(?:s)?\b",
+    r"\bdamn\b",
+]
 
 
 class CreateCommentRequest(BaseModel):
     comment_text: str = Field(..., min_length=1, max_length=COMMENT_MAX_LENGTH)
     parent_comment_id: int | None = None
+    reply_to_comment_id: int | None = None
+
+
+class UpdateCommentRequest(BaseModel):
+    comment_text: str = Field(..., min_length=1, max_length=COMMENT_MAX_LENGTH)
+
+
+class ReportCommentRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=100)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class ReportCampaignRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=100)
+    notes: str | None = Field(default=None, max_length=2000)
 
 
 async def _get_campaign_by_url_or_id(campaign_url: str):
@@ -46,10 +72,7 @@ async def _get_campaign_by_url_or_id(campaign_url: str):
                 campaign_url,
             )
 
-        if not campaign:
-            return None
-
-        return dict(campaign)
+        return dict(campaign) if campaign else None
 
 
 async def _get_friend_ids_for_user(conn, viewer_id: str | None) -> set[str]:
@@ -71,6 +94,34 @@ async def _get_friend_ids_for_user(conn, viewer_id: str | None) -> set[str]:
     return {row["friend_id"] for row in rows}
 
 
+def _contains_foul_language(text: str) -> bool:
+    normalized = re.sub(r"[^a-zA-Z0-9\s]", " ", text.lower())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in BANNED_WORD_PATTERNS)
+
+
+def _validate_comment_text(comment_text: str) -> str:
+    cleaned = comment_text.strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="Comment cannot be empty")
+    if len(cleaned) > COMMENT_MAX_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Comment cannot exceed {COMMENT_MAX_LENGTH} characters",
+        )
+    if _contains_foul_language(cleaned):
+        raise HTTPException(status_code=400, detail="Please remove profanity from your comment and try again")
+    return cleaned
+
+
+def _parent_order_sql(sort_by: str) -> str:
+    if sort_by == "oldest":
+        return "c.time_created ASC, c.comment_id ASC"
+    if sort_by == "most_liked":
+        return "like_count DESC, c.time_created DESC, c.comment_id DESC"
+    return "c.time_created DESC, c.comment_id DESC"
+
+
 def _decorate_comment(
     comment: dict,
     viewer_id: str | None,
@@ -80,6 +131,70 @@ def _decorate_comment(
     comment["is_you"] = bool(viewer_id and comment["creator_id"] == viewer_id)
     comment["is_friend"] = bool(comment["creator_id"] in friend_ids) if viewer_id else False
     comment["is_project_owner"] = comment["creator_id"] == campaign_owner_id
+    comment["like_count"] = int(comment.get("like_count") or 0)
+    comment["liked_by_viewer"] = bool(comment.get("liked_by_viewer"))
+
+    time_created = comment.get("time_created")
+    updated_at = comment.get("updated_at")
+    comment["was_edited"] = bool(
+        time_created
+        and updated_at
+        and updated_at - time_created > timedelta(seconds=5)
+    )
+
+    return comment
+
+
+async def _fetch_comment_payload(conn, comment_id: int, viewer_id: str | None, campaign_owner_id: str, friend_ids: set[str]) -> dict:
+    row = await conn.fetchrow(
+        """
+        SELECT
+            c.comment_id,
+            c.comment_text,
+            c.creator_id,
+            c.campaign_id,
+            c.parent_comment_id,
+            c.reply_to_comment_id,
+            c.time_created,
+            c.updated_at,
+            cr.name,
+            cr.last_name,
+            cr.avatar_url,
+            cr.user_type,
+            rt.name AS reply_to_name,
+            COALESCE(cl.like_count, 0) AS like_count,
+            CASE
+              WHEN $2::text IS NULL THEN FALSE
+              ELSE EXISTS (
+                SELECT 1
+                FROM comment_likes viewer_like
+                WHERE viewer_like.comment_id = c.comment_id
+                  AND viewer_like.creator_id = $2
+              )
+            END AS liked_by_viewer
+        FROM comments c
+        LEFT JOIN creators cr ON cr.creator_id = c.creator_id
+        LEFT JOIN creators rt ON rt.creator_id = (
+            SELECT creator_id FROM comments WHERE comment_id = c.reply_to_comment_id
+        )
+        LEFT JOIN (
+            SELECT comment_id, COUNT(*) AS like_count
+            FROM comment_likes
+            GROUP BY comment_id
+        ) cl ON cl.comment_id = c.comment_id
+        WHERE c.comment_id = $1
+        """,
+        comment_id,
+        viewer_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Comment not found")
+
+    comment = dict(row)
+    comment = _decorate_comment(comment, viewer_id, friend_ids, campaign_owner_id)
+    comment["replies"] = []
+    comment["reply_count"] = 0
+    comment["has_more_replies"] = False
     return comment
 
 
@@ -87,44 +202,23 @@ def _decorate_comment(
 async def get_campaign_page(
     campaign_url: str,
     page: int = Query(1, ge=1),
+    sort_by: Literal["newest", "oldest", "most_liked"] = Query("newest"),
     current_user: User | None = Depends(get_current_user),
 ):
+    campaign = await _get_campaign_by_url_or_id(campaign_url)
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
     pool = await get_pool()
 
     async with pool.acquire() as conn:
-        campaign = None
-
-        if campaign_url.isdigit():
-            campaign = await conn.fetchrow(
-                """
-                SELECT *
-                FROM campaigns
-                WHERE campaign_id = $1
-                """,
-                int(campaign_url),
-            )
-
-        if not campaign:
-            campaign = await conn.fetchrow(
-                """
-                SELECT *
-                FROM campaigns
-                WHERE url = $1
-                """,
-                campaign_url,
-            )
-
-        if not campaign:
-            raise HTTPException(status_code=404, detail="Campaign not found")
-
-        campaign = dict(campaign)
         cid = campaign["campaign_id"]
         campaign_owner_id = campaign["creator_id"]
         viewer_id = current_user.id if current_user else None
 
         creator = await conn.fetchrow(
             """
-            SELECT creator_id, name, last_name, email, bio, avatar_url
+            SELECT creator_id, name, last_name, email, bio, avatar_url, user_type
             FROM creators
             WHERE creator_id = $1
             """,
@@ -132,44 +226,46 @@ async def get_campaign_page(
         )
         creator = dict(creator) if creator else None
 
-        faqs = await conn.fetch(
-            """
-            SELECT *
-            FROM faqs
-            WHERE campaign_id = $1
-            ORDER BY display_order ASC
-            """,
-            cid,
-        )
-        faqs = [dict(f) for f in faqs]
-
-        rewards = await conn.fetch(
-            """
-            SELECT *
-            FROM rewards
-            WHERE campaign_id = $1
-            ORDER BY display_order ASC, reward_id ASC
-            """,
-            cid,
-        )
-        rewards = [dict(r) for r in rewards]
-
-        photos = await conn.fetch(
-            """
-            SELECT *
-            FROM campaign_photos
-            WHERE campaign_id = $1
-            ORDER BY is_primary DESC, photo_id ASC
-            """,
-            cid,
-        )
-        photos = [dict(p) for p in photos]
-
-        for p in photos:
-            p["image_url"] = (
-                f"https://{p['s3_bucket']}.s3.us-east-2.amazonaws.com/"
-                f"{p['s3_key']}"
+        faqs = [
+            dict(f)
+            for f in await conn.fetch(
+                """
+                SELECT *
+                FROM faqs
+                WHERE campaign_id = $1
+                ORDER BY display_order ASC
+                """,
+                cid,
             )
+        ]
+
+        rewards = [
+            dict(r)
+            for r in await conn.fetch(
+                """
+                SELECT *
+                FROM rewards
+                WHERE campaign_id = $1
+                ORDER BY display_order ASC, reward_id ASC
+                """,
+                cid,
+            )
+        ]
+
+        photos = [
+            dict(p)
+            for p in await conn.fetch(
+                """
+                SELECT *
+                FROM campaign_photos
+                WHERE campaign_id = $1
+                ORDER BY is_primary DESC, photo_id ASC
+                """,
+                cid,
+            )
+        ]
+        for p in photos:
+            p["image_url"] = f"https://{p['s3_bucket']}.s3.us-east-2.amazonaws.com/{p['s3_key']}"
 
         friend_ids = await _get_friend_ids_for_user(conn, viewer_id)
 
@@ -186,39 +282,61 @@ async def get_campaign_page(
         total_pages = max(1, ceil(total_parent_comments / COMMENTS_PER_PAGE))
         current_page = min(page, total_pages)
         offset = (current_page - 1) * COMMENTS_PER_PAGE
+        order_sql = _parent_order_sql(sort_by)
 
         parent_comments = await conn.fetch(
-            """
+            f"""
             SELECT
                 c.comment_id,
                 c.comment_text,
                 c.creator_id,
                 c.campaign_id,
                 c.parent_comment_id,
+                c.reply_to_comment_id,
                 c.time_created,
+                c.updated_at,
                 cr.name,
                 cr.last_name,
-                cr.avatar_url
+                cr.avatar_url,
+                cr.user_type,
+                rt.name AS reply_to_name,
+                COALESCE(cl.like_count, 0) AS like_count,
+                CASE
+                  WHEN $4::text IS NULL THEN FALSE
+                  ELSE EXISTS (
+                    SELECT 1
+                    FROM comment_likes viewer_like
+                    WHERE viewer_like.comment_id = c.comment_id
+                      AND viewer_like.creator_id = $4
+                  )
+                END AS liked_by_viewer
             FROM comments c
             LEFT JOIN creators cr ON cr.creator_id = c.creator_id
+            LEFT JOIN creators rt ON rt.creator_id = (
+                SELECT creator_id FROM comments WHERE comment_id = c.reply_to_comment_id
+            )
+            LEFT JOIN (
+                SELECT comment_id, COUNT(*) AS like_count
+                FROM comment_likes
+                GROUP BY comment_id
+            ) cl ON cl.comment_id = c.comment_id
             WHERE c.campaign_id = $1
               AND c.parent_comment_id IS NULL
-            ORDER BY c.time_created DESC, c.comment_id DESC
+            ORDER BY {order_sql}
             LIMIT $2 OFFSET $3
             """,
             cid,
             COMMENTS_PER_PAGE,
             offset,
+            viewer_id,
         )
 
-        parent_comments = [dict(c) for c in parent_comments]
         parent_comments = [
-            _decorate_comment(c, viewer_id, friend_ids, campaign_owner_id)
+            _decorate_comment(dict(c), viewer_id, friend_ids, campaign_owner_id)
             for c in parent_comments
         ]
 
         comment_ids = [c["comment_id"] for c in parent_comments]
-
         replies_by_parent: dict[int, list[dict]] = {}
         reply_counts_by_parent: dict[int, int] = {}
 
@@ -232,9 +350,9 @@ async def get_campaign_page(
                 """,
                 comment_ids,
             )
-
             reply_counts_by_parent = {
-                row["parent_comment_id"]: row["reply_count"] for row in reply_counts
+                row["parent_comment_id"]: int(row["reply_count"])
+                for row in reply_counts
             }
 
             initial_replies = await conn.fetch(
@@ -247,16 +365,38 @@ async def get_campaign_page(
                         c.creator_id,
                         c.campaign_id,
                         c.parent_comment_id,
+                        c.reply_to_comment_id,
                         c.time_created,
+                        c.updated_at,
                         cr.name,
                         cr.last_name,
                         cr.avatar_url,
+                        cr.user_type,
+                        rt.name AS reply_to_name,
+                        COALESCE(cl.like_count, 0) AS like_count,
+                        CASE
+                          WHEN $3::text IS NULL THEN FALSE
+                          ELSE EXISTS (
+                            SELECT 1
+                            FROM comment_likes viewer_like
+                            WHERE viewer_like.comment_id = c.comment_id
+                              AND viewer_like.creator_id = $3
+                          )
+                        END AS liked_by_viewer,
                         ROW_NUMBER() OVER (
                             PARTITION BY c.parent_comment_id
                             ORDER BY c.time_created ASC, c.comment_id ASC
                         ) AS rn
                     FROM comments c
                     LEFT JOIN creators cr ON cr.creator_id = c.creator_id
+                    LEFT JOIN creators rt ON rt.creator_id = (
+                        SELECT creator_id FROM comments WHERE comment_id = c.reply_to_comment_id
+                    )
+                    LEFT JOIN (
+                        SELECT comment_id, COUNT(*) AS like_count
+                        FROM comment_likes
+                        GROUP BY comment_id
+                    ) cl ON cl.comment_id = c.comment_id
                     WHERE c.parent_comment_id = ANY($1::int[])
                 ) ranked
                 WHERE rn <= $2
@@ -264,26 +404,27 @@ async def get_campaign_page(
                 """,
                 comment_ids,
                 INITIAL_REPLIES_LIMIT,
+                viewer_id,
             )
 
             for row in initial_replies:
                 reply = dict(row)
                 reply.pop("rn", None)
                 reply = _decorate_comment(reply, viewer_id, friend_ids, campaign_owner_id)
-                parent_id = reply["parent_comment_id"]
-                replies_by_parent.setdefault(parent_id, []).append(reply)
+                replies_by_parent.setdefault(reply["parent_comment_id"], []).append(reply)
 
         comments = []
         for comment in parent_comments:
             replies = replies_by_parent.get(comment["comment_id"], [])
             reply_count = int(reply_counts_by_parent.get(comment["comment_id"], 0))
-
-            comments.append({
-                **comment,
-                "replies": replies,
-                "reply_count": reply_count,
-                "has_more_replies": reply_count > len(replies),
-            })
+            comments.append(
+                {
+                    **comment,
+                    "replies": replies,
+                    "reply_count": reply_count,
+                    "has_more_replies": reply_count > len(replies),
+                }
+            )
 
     return {
         "campaign": campaign,
@@ -322,13 +463,10 @@ async def get_comment_replies(
             """,
             comment_id,
         )
-
         if not parent_comment:
             raise HTTPException(status_code=404, detail="Comment not found")
-
         if parent_comment["campaign_id"] != campaign["campaign_id"]:
             raise HTTPException(status_code=400, detail="Comment does not belong to this campaign")
-
         if parent_comment["parent_comment_id"] is not None:
             raise HTTPException(status_code=400, detail="Replies can only be loaded for parent comments")
 
@@ -344,16 +482,39 @@ async def get_comment_replies(
                 c.creator_id,
                 c.campaign_id,
                 c.parent_comment_id,
+                c.reply_to_comment_id,
                 c.time_created,
+                c.updated_at,
                 cr.name,
                 cr.last_name,
-                cr.avatar_url
+                cr.avatar_url,
+                cr.user_type,
+                rt.name AS reply_to_name,
+                COALESCE(cl.like_count, 0) AS like_count,
+                CASE
+                  WHEN $2::text IS NULL THEN FALSE
+                  ELSE EXISTS (
+                    SELECT 1
+                    FROM comment_likes viewer_like
+                    WHERE viewer_like.comment_id = c.comment_id
+                      AND viewer_like.creator_id = $2
+                  )
+                END AS liked_by_viewer
             FROM comments c
             LEFT JOIN creators cr ON cr.creator_id = c.creator_id
+            LEFT JOIN creators rt ON rt.creator_id = (
+                SELECT creator_id FROM comments WHERE comment_id = c.reply_to_comment_id
+            )
+            LEFT JOIN (
+                SELECT comment_id, COUNT(*) AS like_count
+                FROM comment_likes
+                GROUP BY comment_id
+            ) cl ON cl.comment_id = c.comment_id
             WHERE c.parent_comment_id = $1
             ORDER BY c.time_created ASC, c.comment_id ASC
             """,
             comment_id,
+            viewer_id,
         )
 
         replies = [
@@ -361,10 +522,7 @@ async def get_comment_replies(
             for r in replies
         ]
 
-    return {
-        "comment_id": comment_id,
-        "replies": replies,
-    }
+    return {"comment_id": comment_id, "replies": replies}
 
 
 @router.post("/{campaign_url}/comments")
@@ -372,81 +530,445 @@ async def create_comment(
     campaign_url: str,
     payload: CreateCommentRequest,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
 ):
     campaign = await _get_campaign_by_url_or_id(campaign_url)
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
 
-    comment_text = payload.comment_text.strip()
-    if not comment_text:
-        raise HTTPException(status_code=400, detail="Comment cannot be empty")
-
-    if len(comment_text) > COMMENT_MAX_LENGTH:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Comment cannot exceed {COMMENT_MAX_LENGTH} characters",
-        )
-
+    comment_text = _validate_comment_text(payload.comment_text)
     pool = await get_pool()
 
     async with pool.acquire() as conn:
-        if payload.parent_comment_id is not None:
+        parent_comment_id = payload.parent_comment_id
+        reply_to_comment_id = payload.reply_to_comment_id
+
+        if parent_comment_id is not None:
             parent_comment = await conn.fetchrow(
                 """
-                SELECT comment_id, campaign_id
+                SELECT comment_id, campaign_id, parent_comment_id
                 FROM comments
                 WHERE comment_id = $1
                 """,
-                payload.parent_comment_id,
+                parent_comment_id,
             )
-
             if not parent_comment:
                 raise HTTPException(status_code=404, detail="Parent comment not found")
-
             if parent_comment["campaign_id"] != campaign["campaign_id"]:
                 raise HTTPException(status_code=400, detail="Parent comment does not belong to this campaign")
+            if parent_comment["parent_comment_id"] is not None:
+                raise HTTPException(status_code=400, detail="Replies must attach to a top-level comment")
+
+        if reply_to_comment_id is not None:
+            reply_target = await conn.fetchrow(
+                """
+                SELECT comment_id, campaign_id, parent_comment_id
+                FROM comments
+                WHERE comment_id = $1
+                """,
+                reply_to_comment_id,
+            )
+            if not reply_target:
+                raise HTTPException(status_code=404, detail="Reply target not found")
+            if reply_target["campaign_id"] != campaign["campaign_id"]:
+                raise HTTPException(status_code=400, detail="Reply target does not belong to this campaign")
+
+            inferred_parent = reply_target["parent_comment_id"] or reply_target["comment_id"]
+            if parent_comment_id is None:
+                parent_comment_id = inferred_parent
+            elif parent_comment_id != inferred_parent:
+                raise HTTPException(status_code=400, detail="Reply target must belong to the selected parent thread")
 
         inserted = await conn.fetchrow(
             """
-            INSERT INTO comments (comment_text, creator_id, campaign_id, parent_comment_id)
-            VALUES ($1, $2, $3, $4)
-            RETURNING comment_id, comment_text, creator_id, campaign_id, parent_comment_id, time_created
+            INSERT INTO comments (comment_text, creator_id, campaign_id, parent_comment_id, reply_to_comment_id, updated_at)
+            VALUES ($1, $2, $3, $4, $5, NOW())
+            RETURNING comment_id
             """,
             comment_text,
             current_user.id,
             campaign["campaign_id"],
-            payload.parent_comment_id,
-        )
-
-        inserted = dict(inserted)
-
-        creator_row = await conn.fetchrow(
-            """
-            SELECT name, last_name, avatar_url
-            FROM creators
-            WHERE creator_id = $1
-            """,
-            current_user.id,
+            parent_comment_id,
+            reply_to_comment_id,
         )
 
         friend_ids = await _get_friend_ids_for_user(conn, current_user.id)
+        comment = await _fetch_comment_payload(
+            conn,
+            inserted["comment_id"],
+            current_user.id,
+            campaign["creator_id"],
+            friend_ids,
+        )
 
-    comment = {
-        **inserted,
-        "name": creator_row["name"] if creator_row else None,
-        "last_name": creator_row["last_name"] if creator_row else None,
-        "avatar_url": creator_row["avatar_url"] if creator_row else None,
-        "replies": [],
-        "reply_count": 0,
-        "has_more_replies": False,
-        "is_you": True,
-        "is_friend": inserted["creator_id"] in friend_ids,
-        "is_project_owner": inserted["creator_id"] == campaign["creator_id"],
-    }
+    return {"comment": comment}
+
+
+@router.patch("/{campaign_url}/comments/{comment_id}")
+async def update_comment(
+    campaign_url: str,
+    comment_id: int,
+    payload: UpdateCommentRequest,
+    current_user: User = Depends(get_current_user),
+):
+    campaign = await _get_campaign_by_url_or_id(campaign_url)
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    comment_text = _validate_comment_text(payload.comment_text)
+    pool = await get_pool()
+
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            """
+            SELECT comment_id, creator_id, campaign_id
+            FROM comments
+            WHERE comment_id = $1
+            """,
+            comment_id,
+        )
+        if not existing:
+            raise HTTPException(status_code=404, detail="Comment not found")
+        if existing["campaign_id"] != campaign["campaign_id"]:
+            raise HTTPException(status_code=400, detail="Comment does not belong to this campaign")
+        if existing["creator_id"] != current_user.id:
+            raise HTTPException(status_code=403, detail="You can only edit your own comments")
+
+        await conn.execute(
+            """
+            UPDATE comments
+            SET comment_text = $2,
+                updated_at = NOW()
+            WHERE comment_id = $1
+            """,
+            comment_id,
+            comment_text,
+        )
+
+        friend_ids = await _get_friend_ids_for_user(conn, current_user.id)
+        comment = await _fetch_comment_payload(
+            conn,
+            comment_id,
+            current_user.id,
+            campaign["creator_id"],
+            friend_ids,
+        )
+
+    return {"comment": comment}
+
+
+@router.post("/{campaign_url}/comments/{comment_id}/like")
+async def like_comment(
+    campaign_url: str,
+    comment_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    campaign = await _get_campaign_by_url_or_id(campaign_url)
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        comment = await conn.fetchrow(
+            """
+            SELECT comment_id, campaign_id
+            FROM comments
+            WHERE comment_id = $1
+            """,
+            comment_id,
+        )
+        if not comment:
+            raise HTTPException(status_code=404, detail="Comment not found")
+        if comment["campaign_id"] != campaign["campaign_id"]:
+            raise HTTPException(status_code=400, detail="Comment does not belong to this campaign")
+
+        await conn.execute(
+            """
+            INSERT INTO comment_likes (comment_id, creator_id)
+            VALUES ($1, $2)
+            ON CONFLICT (comment_id, creator_id) DO NOTHING
+            """,
+            comment_id,
+            current_user.id,
+        )
+
+        like_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM comment_likes WHERE comment_id = $1",
+            comment_id,
+        )
+
+    return {"liked": True, "like_count": int(like_count), "comment_id": comment_id}
+
+
+@router.delete("/{campaign_url}/comments/{comment_id}/like")
+async def unlike_comment(
+    campaign_url: str,
+    comment_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    campaign = await _get_campaign_by_url_or_id(campaign_url)
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        comment = await conn.fetchrow(
+            """
+            SELECT comment_id, campaign_id
+            FROM comments
+            WHERE comment_id = $1
+            """,
+            comment_id,
+        )
+        if not comment:
+            raise HTTPException(status_code=404, detail="Comment not found")
+        if comment["campaign_id"] != campaign["campaign_id"]:
+            raise HTTPException(status_code=400, detail="Comment does not belong to this campaign")
+
+        await conn.execute(
+            """
+            DELETE FROM comment_likes
+            WHERE comment_id = $1
+              AND creator_id = $2
+            """,
+            comment_id,
+            current_user.id,
+        )
+
+        like_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM comment_likes WHERE comment_id = $1",
+            comment_id,
+        )
+
+    return {"liked": False, "like_count": int(like_count), "comment_id": comment_id}
+
+
+@router.post("/{campaign_url}/report")
+async def report_campaign(
+    campaign_url: str,
+    payload: ReportCampaignRequest,
+    current_user: User = Depends(get_current_user),
+):
+    campaign = await _get_campaign_by_url_or_id(campaign_url)
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    pool = await get_pool()
+
+    async with pool.acquire() as conn:
+        creator = await conn.fetchrow(
+            """
+            SELECT creator_id, name, last_name, user_type
+            FROM creators
+            WHERE creator_id = $1
+            """,
+            campaign["creator_id"],
+        )
+
+        inserted = await conn.fetchrow(
+            """
+            INSERT INTO campaign_reports (
+                reporter_creator_id,
+                reported_campaign_id,
+                reported_campaign_creator_id,
+                reported_campaign_creator_name,
+                reported_campaign_creator_last_name,
+                reported_campaign_creator_username,
+                reported_campaign_creator_user_type,
+                reported_campaign_title_snapshot,
+                reported_campaign_status_snapshot,
+                reported_campaign_url_snapshot,
+                reported_campaign_description_html_snapshot,
+                reported_campaign_category_snapshot,
+                reported_campaign_location_snapshot,
+                reported_campaign_funding_goal_cents_snapshot,
+                reported_campaign_duration_days_snapshot,
+                reported_campaign_amount_raised_cents_snapshot,
+                reported_campaign_backers_snapshot,
+                reported_campaign_time_created_snapshot,
+                reported_campaign_end_date_snapshot,
+                reported_campaign_bio_snapshot,
+                reason,
+                notes,
+                status
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7,
+                $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+                NULLIF($21, ''), NULLIF($22, ''), 'open'
+            )
+            RETURNING report_id, time_reported
+            """,
+            current_user.id,
+            campaign["campaign_id"],
+            campaign["creator_id"],
+            creator["name"] if creator else None,
+            creator["last_name"] if creator else None,
+            campaign["creator_id"],
+            creator["user_type"] if creator else None,
+            campaign.get("title"),
+            campaign.get("status"),
+            campaign.get("url"),
+            campaign.get("description_html"),
+            campaign.get("category"),
+            campaign.get("location"),
+            campaign.get("funding_goal_cents"),
+            campaign.get("duration_days"),
+            campaign.get("amount_raised_cents"),
+            campaign.get("backers"),
+            campaign.get("time_created"),
+            campaign.get("end_date"),
+            campaign.get("bio"),
+            (payload.reason or "").strip(),
+            (payload.notes or "").strip(),
+        )
+
+        photos = await conn.fetch(
+            """
+            SELECT
+                photo_id,
+                campaign_id,
+                s3_bucket,
+                s3_key,
+                content_type,
+                file_size_bytes,
+                width_px,
+                height_px,
+                is_primary,
+                sort_order,
+                uploaded_by_creator_id,
+                time_created
+            FROM campaign_photos
+            WHERE campaign_id = $1
+            ORDER BY is_primary DESC, sort_order ASC NULLS LAST, photo_id ASC
+            """,
+            campaign["campaign_id"],
+        )
+
+        for photo in photos:
+            await conn.execute(
+                """
+                INSERT INTO campaign_report_photos (
+                    report_id,
+                    reported_photo_id,
+                    reported_campaign_id,
+                    s3_bucket_snapshot,
+                    s3_key_snapshot,
+                    image_url_snapshot,
+                    content_type_snapshot,
+                    file_size_bytes_snapshot,
+                    width_px_snapshot,
+                    height_px_snapshot,
+                    is_primary_snapshot,
+                    sort_order_snapshot,
+                    uploaded_by_creator_id_snapshot,
+                    photo_time_created_snapshot
+                )
+                VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+                )
+                """,
+                inserted["report_id"],
+                photo["photo_id"],
+                photo["campaign_id"],
+                photo["s3_bucket"],
+                photo["s3_key"],
+                f"https://{photo['s3_bucket']}.s3.us-east-2.amazonaws.com/{photo['s3_key']}" if photo["s3_bucket"] and photo["s3_key"] else None,
+                photo["content_type"],
+                photo["file_size_bytes"],
+                photo["width_px"],
+                photo["height_px"],
+                photo["is_primary"],
+                photo["sort_order"],
+                photo["uploaded_by_creator_id"],
+                photo["time_created"],
+            )
 
     return {
-        "comment": comment
+        "ok": True,
+        "report_id": inserted["report_id"],
+        "campaign_id": campaign["campaign_id"],
+        "status": "open",
+        "time_reported": inserted["time_reported"],
+    }
+
+
+@router.post("/{campaign_url}/comments/{comment_id}/report")
+async def report_comment(
+    campaign_url: str,
+    comment_id: int,
+    payload: ReportCommentRequest = ReportCommentRequest(),
+    current_user: User = Depends(get_current_user),
+):
+    campaign = await _get_campaign_by_url_or_id(campaign_url)
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        comment = await conn.fetchrow(
+            """
+            SELECT
+                c.comment_id,
+                c.campaign_id,
+                c.creator_id,
+                c.comment_text,
+                c.time_created,
+                c.updated_at,
+                cr.name,
+                cr.last_name
+            FROM comments c
+            LEFT JOIN creators cr ON cr.creator_id = c.creator_id
+            WHERE c.comment_id = $1
+            """,
+            comment_id,
+        )
+        if not comment:
+            raise HTTPException(status_code=404, detail="Comment not found")
+        if comment["campaign_id"] != campaign["campaign_id"]:
+            raise HTTPException(status_code=400, detail="Comment does not belong to this campaign")
+
+        inserted = await conn.fetchrow(
+            """
+            INSERT INTO comment_reports (
+                reporter_creator_id,
+                reported_comment_id,
+                reported_campaign_id,
+                reported_comment_creator_id,
+                reported_comment_creator_name,
+                reported_comment_creator_last_name,
+                reported_comment_creator_username,
+                reported_comment_text_snapshot,
+                reported_comment_time_created,
+                reported_comment_updated_at_snapshot,
+                reason,
+                notes,
+                status
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11, ''), NULLIF($12, ''), 'open'
+            )
+            RETURNING report_id, time_reported
+            """,
+            current_user.id,
+            comment["comment_id"],
+            comment["campaign_id"],
+            comment["creator_id"],
+            comment["name"],
+            comment["last_name"],
+            comment["creator_id"],
+            comment["comment_text"],
+            comment["time_created"],
+            comment["updated_at"],
+            (payload.reason or "").strip(),
+            (payload.notes or "").strip(),
+        )
+
+    return {
+        "ok": True,
+        "report_id": inserted["report_id"],
+        "comment_id": comment_id,
+        "status": "open",
+        "time_reported": inserted["time_reported"],
     }
 
 
@@ -461,35 +983,33 @@ async def delete_comment(
         raise HTTPException(status_code=404, detail="Campaign not found")
 
     pool = await get_pool()
-
     async with pool.acquire() as conn:
         comment = await conn.fetchrow(
             """
-            SELECT comment_id, creator_id, campaign_id
+            SELECT comment_id, creator_id, campaign_id, parent_comment_id
             FROM comments
             WHERE comment_id = $1
             """,
             comment_id,
         )
-
         if not comment:
             raise HTTPException(status_code=404, detail="Comment not found")
-
         if comment["campaign_id"] != campaign["campaign_id"]:
             raise HTTPException(status_code=400, detail="Comment does not belong to this campaign")
-
         if comment["creator_id"] != current_user.id:
             raise HTTPException(status_code=403, detail="You can only delete your own comments")
 
-        await conn.execute(
-            """
-            DELETE FROM comments
-            WHERE comment_id = $1
-            """,
-            comment_id,
-        )
+        if comment["parent_comment_id"] is None:
+            await conn.execute(
+                "DELETE FROM comment_likes WHERE comment_id IN (SELECT comment_id FROM comments WHERE comment_id = $1 OR parent_comment_id = $1)",
+                comment_id,
+            )
+            await conn.execute(
+                "DELETE FROM comments WHERE comment_id = $1 OR parent_comment_id = $1",
+                comment_id,
+            )
+        else:
+            await conn.execute("DELETE FROM comment_likes WHERE comment_id = $1", comment_id)
+            await conn.execute("DELETE FROM comments WHERE comment_id = $1", comment_id)
 
-    return {
-        "ok": True,
-        "comment_id": comment_id,
-    }
+    return {"ok": True, "comment_id": comment_id}
