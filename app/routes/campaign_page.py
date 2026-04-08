@@ -46,6 +46,40 @@ class ReportCampaignRequest(BaseModel):
     notes: str | None = Field(default=None, max_length=2000)
 
 
+class EditRewardRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=255)
+    description: str | None = None
+    required_amount_cents: int = Field(..., ge=1)
+    limit_total: int | None = Field(default=None, ge=1)
+    display_order: int = Field(default=0, ge=0)
+
+
+class EditFaqRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=500)
+    answer: str = Field(..., min_length=1, max_length=4000)
+    display_order: int = Field(default=0, ge=0)
+
+
+class EditPhotoRequest(BaseModel):
+    s3_bucket: str = Field(..., min_length=1, max_length=255)
+    s3_key: str = Field(..., min_length=1, max_length=1024)
+    content_type: str = Field(default="image/jpeg", min_length=1, max_length=255)
+    is_primary: bool = False
+    sort_order: int = Field(default=0, ge=0)
+
+
+class EditCampaignRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=255)
+    description_html: str = Field(..., min_length=1)
+    category: str | None = None
+    location: str | None = None
+    funding_goal_cents: int = Field(..., ge=1)
+    duration_days: int | None = Field(default=None, ge=1)
+    rewards: list[EditRewardRequest] = Field(default_factory=list)
+    faqs: list[EditFaqRequest] = Field(default_factory=list)
+    photos: list[EditPhotoRequest] = Field(default_factory=list)
+
+
 async def _get_campaign_by_url_or_id(campaign_url: str):
     pool = await get_pool()
 
@@ -1017,3 +1051,118 @@ async def delete_comment(
             await conn.execute("DELETE FROM comments WHERE comment_id = $1", comment_id)
 
     return {"ok": True, "comment_id": comment_id}
+
+@router.patch("/{campaign_url}/edit")
+async def edit_campaign(
+    campaign_url: str,
+    payload: EditCampaignRequest,
+    current_user: User = Depends(get_current_user),
+):
+    campaign = await _get_campaign_by_url_or_id(campaign_url)
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    if campaign["creator_id"] != current_user.id:
+        raise HTTPException(status_code=403, detail="You can only edit your own campaign")
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            updated = await conn.fetchrow(
+                """
+                UPDATE campaigns
+                SET title = $2,
+                    description_html = $3,
+                    category = $4,
+                    location = $5,
+                    funding_goal_cents = $6,
+                    duration_days = $7
+                WHERE campaign_id = $1
+                RETURNING *
+                """,
+                campaign["campaign_id"],
+                payload.title.strip(),
+                payload.description_html.strip(),
+                payload.category.strip() if payload.category else None,
+                payload.location.strip() if payload.location else None,
+                payload.funding_goal_cents,
+                payload.duration_days,
+            )
+
+            await conn.execute("DELETE FROM rewards WHERE campaign_id = $1", campaign["campaign_id"])
+            for idx, reward in enumerate(payload.rewards):
+                await conn.execute(
+                    """
+                    INSERT INTO rewards (campaign_id, title, required_amount_cents, description, limit_total, display_order)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    """,
+                    campaign["campaign_id"],
+                    reward.title.strip(),
+                    reward.required_amount_cents,
+                    reward.description.strip() if reward.description else None,
+                    reward.limit_total,
+                    idx,
+                )
+
+            await conn.execute("DELETE FROM faqs WHERE campaign_id = $1", campaign["campaign_id"])
+            for idx, faq in enumerate(payload.faqs):
+                await conn.execute(
+                    """
+                    INSERT INTO faqs (campaign_id, display_order, question, answer)
+                    VALUES ($1, $2, $3, $4)
+                    """,
+                    campaign["campaign_id"],
+                    idx,
+                    faq.question.strip(),
+                    faq.answer.strip(),
+                )
+
+            await conn.execute("DELETE FROM campaign_photos WHERE campaign_id = $1", campaign["campaign_id"])
+            for idx, photo in enumerate(payload.photos):
+                await conn.execute(
+                    """
+                    INSERT INTO campaign_photos (
+                        campaign_id,
+                        s3_bucket,
+                        s3_key,
+                        content_type,
+                        is_primary,
+                        sort_order,
+                        uploaded_by_creator_id
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    """,
+                    campaign["campaign_id"],
+                    photo.s3_bucket.strip(),
+                    photo.s3_key.strip(),
+                    photo.content_type.strip() if photo.content_type else "image/jpeg",
+                    idx == 0,
+                    idx,
+                    current_user.id,
+                )
+
+    return {"ok": True, "campaign": dict(updated)}
+
+@router.delete("/{campaign_url}")
+async def delete_campaign(
+    campaign_url: str,
+    current_user: User = Depends(get_current_user),
+):
+    campaign = await _get_campaign_by_url_or_id(campaign_url)
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    if campaign["creator_id"] != current_user.id:
+        raise HTTPException(status_code=403, detail="You can only delete your own campaign")
+    if campaign["status"] != "draft":
+        raise HTTPException(status_code=400, detail="Only draft campaigns can be deleted")
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("DELETE FROM campaign_photos WHERE campaign_id = $1", campaign["campaign_id"])
+            await conn.execute("DELETE FROM rewards WHERE campaign_id = $1", campaign["campaign_id"])
+            await conn.execute("DELETE FROM faqs WHERE campaign_id = $1", campaign["campaign_id"])
+            await conn.execute("DELETE FROM comments WHERE campaign_id = $1", campaign["campaign_id"])
+            await conn.execute("DELETE FROM campaigns WHERE campaign_id = $1", campaign["campaign_id"])
+
+    return {"ok": True, "campaign_id": campaign["campaign_id"]}
+
