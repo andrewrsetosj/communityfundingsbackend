@@ -88,13 +88,15 @@ def _build_campaign_object_key(campaign_id: int, ext: str) -> str:
     return f"campaigns/{campaign_id}/{stem}.{ext}"
 
 
-async def _assert_draft_owned(campaign_id: int, user_id: str) -> None:
+async def _assert_campaign_owned(campaign_id: int, user_id: str) -> None:
     pool = await rds_db.get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT campaign_id FROM public.campaigns
-            WHERE campaign_id = $1 AND creator_id = $2 AND status = 'draft'
+            SELECT campaign_id
+            FROM public.campaigns
+            WHERE campaign_id = $1
+              AND creator_id = $2
             LIMIT 1
             """,
             campaign_id,
@@ -103,7 +105,7 @@ async def _assert_draft_owned(campaign_id: int, user_id: str) -> None:
     if not row:
         raise HTTPException(
             status_code=403,
-            detail="Invalid campaign or you can only upload to your own drafts",
+            detail="Invalid campaign or you can only upload to your own campaigns",
         )
 
 
@@ -113,7 +115,7 @@ async def upload_campaign_file(
     file: UploadFile = File(...),
     user: User = Depends(get_current_user),
 ):
-    """Upload one image or video via API → S3 (avoids browser CORS to S3)."""
+    """Upload one image or video via API → S3 for a campaign you own (avoids browser CORS to S3)."""
     content_type = (file.content_type or "").strip() or "application/octet-stream"
     if content_type not in ALLOWED_UPLOAD_TYPES:
         raise HTTPException(
@@ -121,7 +123,7 @@ async def upload_campaign_file(
             detail=f"File type not allowed: {content_type}",
         )
 
-    await _assert_draft_owned(campaign_id, user.id)
+    await _assert_campaign_owned(campaign_id, user.id)
 
     raw = await file.read()
     max_bytes = _max_bytes_for_type(content_type)
