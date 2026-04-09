@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.auth import get_current_user
+from app.auth import get_current_user, get_optional_user
 from app.db import get_pool
 from app.models.models import User
 
@@ -27,6 +27,7 @@ async def _get_creator_profile(conn, creator_id_or_username: str) -> dict | None
             bio,
             website,
             avatar_url,
+            email,
             time_creation
         FROM creators
         WHERE creator_id = $1
@@ -39,7 +40,7 @@ async def _get_creator_profile(conn, creator_id_or_username: str) -> dict | None
 
 
 @router.get("/{creator_id_or_username}")
-async def get_profile_page(creator_id_or_username: str):
+async def get_profile_page(creator_id_or_username: str, current_user: User | None = Depends(get_optional_user)):
     pool = await get_pool()
 
     async with pool.acquire() as conn:
@@ -48,6 +49,8 @@ async def get_profile_page(creator_id_or_username: str):
             raise HTTPException(status_code=404, detail="Profile not found")
 
         creator_id = creator["creator_id"]
+        creator_email = (creator.get("email") or "").strip()
+        viewer_is_self = bool(current_user and current_user.id == creator_id)
 
         interests = await conn.fetch(
             """
@@ -108,6 +111,63 @@ async def get_profile_page(creator_id_or_username: str):
             else:
                 campaign["image_url"] = None
 
+        collaborations = await conn.fetch(
+            """
+            SELECT
+                c.campaign_id,
+                c.creator_id,
+                c.title,
+                c.status,
+                c.time_created,
+                c.url,
+                c.description_html,
+                c.category,
+                c.location,
+                c.funding_goal_cents,
+                c.duration_days,
+                c.amount_raised_cents,
+                c.backers,
+                cp.photo_id,
+                cp.s3_bucket,
+                cp.s3_key,
+                cp.content_type,
+                cp.is_primary,
+                owner.name AS owner_name,
+                owner.last_name AS owner_last_name,
+                COALESCE(NULLIF(owner.username, ''), owner.creator_id) AS owner_username
+            FROM collaborators coll
+            JOIN campaigns c
+              ON c.campaign_id = coll.campaign_id
+            JOIN creators owner
+              ON owner.creator_id = c.creator_id
+            LEFT JOIN LATERAL (
+                SELECT
+                    photo_id,
+                    s3_bucket,
+                    s3_key,
+                    content_type,
+                    is_primary
+                FROM campaign_photos
+                WHERE campaign_id = c.campaign_id
+                ORDER BY is_primary DESC, photo_id ASC
+                LIMIT 1
+            ) cp ON true
+            WHERE LOWER(coll.email) = LOWER($1)
+              AND LOWER(COALESCE(coll.status, '')) = 'accepted'
+              AND c.status <> 'inactive'
+              AND ($2::bool OR c.status = 'active')
+            ORDER BY coll.time_created DESC, c.campaign_id DESC
+            """,
+            creator_email,
+            viewer_is_self,
+        )
+        collaborations = [dict(c) for c in collaborations]
+        for campaign in collaborations:
+            if campaign.get("s3_bucket") and campaign.get("s3_key"):
+                campaign["image_url"] = f"https://{campaign['s3_bucket']}.s3.us-east-2.amazonaws.com/{campaign['s3_key']}"
+            else:
+                campaign["image_url"] = None
+
         activity_rows = await conn.fetch(
             """
             SELECT *
@@ -120,6 +180,7 @@ async def get_profile_page(creator_id_or_username: str):
                     camp.campaign_id,
                     camp.url AS campaign_url,
                     camp.title AS campaign_title,
+                    camp.status AS campaign_status,
                     NULL::text AS target_creator_id,
                     NULL::text AS target_name,
                     NULL::text AS target_last_name,
@@ -139,6 +200,7 @@ async def get_profile_page(creator_id_or_username: str):
                     NULL::bigint AS campaign_id,
                     NULL::text AS campaign_url,
                     NULL::text AS campaign_title,
+                    NULL::text AS campaign_status,
                     followed.creator_id AS target_creator_id,
                     followed.name AS target_name,
                     followed.last_name AS target_last_name,
@@ -151,6 +213,27 @@ async def get_profile_page(creator_id_or_username: str):
                 UNION ALL
 
                 SELECT
+                    'joined_as_collaborator'::text AS activity_type,
+                    coll.time_created AS activity_time,
+                    NULL::bigint AS comment_id,
+                    NULL::text AS activity_text,
+                    camp.campaign_id,
+                    camp.url AS campaign_url,
+                    camp.title AS campaign_title,
+                    camp.status AS campaign_status,
+                    NULL::text AS target_creator_id,
+                    NULL::text AS target_name,
+                    NULL::text AS target_last_name,
+                    NULL::text AS target_username
+                FROM collaborators coll
+                JOIN campaigns camp
+                  ON camp.campaign_id = coll.campaign_id
+                WHERE LOWER(coll.email) = LOWER($2)
+                  AND LOWER(COALESCE(coll.status, '')) = 'accepted'
+
+                UNION ALL
+
+                SELECT
                     'created_campaign'::text AS activity_type,
                     camp.time_created AS activity_time,
                     NULL::bigint AS comment_id,
@@ -158,6 +241,7 @@ async def get_profile_page(creator_id_or_username: str):
                     camp.campaign_id,
                     camp.url AS campaign_url,
                     camp.title AS campaign_title,
+                    camp.status AS campaign_status,
                     NULL::text AS target_creator_id,
                     NULL::text AS target_name,
                     NULL::text AS target_last_name,
@@ -169,6 +253,7 @@ async def get_profile_page(creator_id_or_username: str):
             LIMIT 10
             """,
             creator_id,
+            creator_email,
         )
 
         activities = []
@@ -181,6 +266,7 @@ async def get_profile_page(creator_id_or_username: str):
         "creator": creator,
         "interests": interests,
         "campaigns": campaigns,
+        "collaborations": collaborations,
         "activities": activities,
     }
 

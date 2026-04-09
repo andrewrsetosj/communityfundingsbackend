@@ -91,23 +91,49 @@ def _build_campaign_object_key(campaign_id: int, ext: str) -> str:
 async def _assert_campaign_owned(campaign_id: int, user_id: str) -> None:
     pool = await rds_db.get_pool()
     async with pool.acquire() as conn:
+        viewer = await conn.fetchrow(
+            """
+            SELECT creator_id, email
+            FROM public.creators
+            WHERE creator_id = $1
+            LIMIT 1
+            """,
+            user_id,
+        )
+
+        if not viewer:
+            raise HTTPException(
+                status_code=403,
+                detail="Invalid user",
+            )
+
+        viewer_email = ((viewer["email"] if viewer else None) or "").strip()
+
         row = await conn.fetchrow(
             """
-            SELECT campaign_id
-            FROM public.campaigns
-            WHERE campaign_id = $1
-              AND creator_id = $2
+            SELECT c.campaign_id
+            FROM public.campaigns c
+            LEFT JOIN public.collaborators coll
+              ON coll.campaign_id = c.campaign_id
+             AND LOWER(coll.email) = LOWER($3)
+             AND LOWER(COALESCE(coll.status, '')) = 'accepted'
+            WHERE c.campaign_id = $1
+              AND (
+                c.creator_id = $2
+                OR coll.collaborator_id IS NOT NULL
+              )
             LIMIT 1
             """,
             campaign_id,
             user_id,
+            viewer_email,
         )
+
     if not row:
         raise HTTPException(
             status_code=403,
-            detail="Invalid campaign or you can only upload to your own campaigns",
+            detail="Invalid campaign or you can only upload to campaigns you own or collaborate on",
         )
-
 
 @router.post("/campaign-file")
 async def upload_campaign_file(

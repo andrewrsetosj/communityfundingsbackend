@@ -11,6 +11,7 @@ from typing import Optional, List
 from decimal import Decimal
 from datetime import datetime, timezone
 import re
+from pydantic import BaseModel
 
 from app.database import get_db
 from app.auth import get_current_user, get_optional_user
@@ -167,16 +168,90 @@ async def check_slug(slug: str, db: AsyncSession = Depends(get_db)):
     return {"available": result.first() is None}
 
 
-@router.get("/my-campaigns", response_model=List[CampaignResponse])
-async def my_campaigns(
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
+@router.get("/my-campaigns")
+async def my_campaigns(user: User = Depends(get_current_user)):
     """Get all campaigns created by the authenticated user."""
-    result = await db.execute(
-        select(Campaign).where(Campaign.creator_id == user.id).order_by(Campaign.created_at.desc())
-    )
-    return [build_campaign_response(c, creator_name=user.name) for c in result.scalars().all()]
+    pool = await db_mod.get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                campaign_id AS id,
+                title,
+                url AS slug,
+                status,
+                category,
+                COALESCE(funding_goal_cents, 0) / 100.0 AS goal_amount,
+                COALESCE(amount_raised_cents, 0) / 100.0 AS raised_amount,
+                CASE
+                    WHEN COALESCE(funding_goal_cents, 0) > 0
+                    THEN ROUND((COALESCE(amount_raised_cents, 0)::numeric / funding_goal_cents::numeric) * 100, 1)
+                    ELSE 0
+                END AS funding_percentage,
+                COALESCE(backers, 0) AS donors_count,
+                CASE
+                    WHEN duration_days IS NULL OR time_created IS NULL THEN NULL
+                    ELSE GREATEST(0, duration_days - FLOOR(EXTRACT(EPOCH FROM (NOW() - time_created)) / 86400.0)::int)
+                END AS days_left,
+                time_created AS created_at
+            FROM public.campaigns
+            WHERE creator_id = $1
+            ORDER BY time_created DESC, campaign_id DESC
+            """,
+            user.id,
+        )
+        return [dict(row) for row in rows]
+
+
+@router.get("/my-collaborations")
+async def my_collaborations(user: User = Depends(get_current_user)):
+    """Get campaigns where the authenticated user is an accepted collaborator."""
+    pool = await db_mod.get_pool()
+    async with pool.acquire() as conn:
+        viewer = await conn.fetchrow(
+            """
+            SELECT email
+            FROM creators
+            WHERE creator_id = $1
+            LIMIT 1
+            """,
+            user.id,
+        )
+        if not viewer:
+            raise HTTPException(status_code=404, detail="Creator profile not found")
+
+        email = (viewer["email"] or "").strip().lower()
+        if not email:
+            return []
+
+        rows = await conn.fetch(
+            """
+            SELECT
+                camp.campaign_id,
+                camp.title,
+                camp.url,
+                camp.status,
+                camp.category,
+                COALESCE(camp.funding_goal_cents, 0) AS funding_goal_cents,
+                COALESCE(camp.amount_raised_cents, 0) AS amount_raised_cents,
+                COALESCE(camp.backers, 0) AS backers,
+                camp.time_created,
+                camp.creator_id,
+                owner.name AS owner_name,
+                owner.last_name AS owner_last_name,
+                COALESCE(NULLIF(owner.username, ''), owner.creator_id) AS owner_username
+            FROM collaborators coll
+            JOIN campaigns camp
+              ON camp.campaign_id = coll.campaign_id
+            JOIN creators owner
+              ON owner.creator_id = camp.creator_id
+            WHERE LOWER(coll.email) = $1
+              AND LOWER(COALESCE(coll.status, '')) = 'accepted'
+            ORDER BY coll.time_created DESC, coll.collaborator_id DESC
+            """,
+            email,
+        )
+        return [dict(row) for row in rows]
 
 
 @router.get("/my-organizations")
@@ -223,6 +298,186 @@ async def my_drafts(user: User = Depends(get_current_user)):
         return await db_mod.list_draft_campaigns(user.id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class CollaboratorInviteActionRequest(BaseModel):
+    action: str | None = None
+
+
+@router.get("/invites/received")
+async def list_received_collaborator_invites(user: User = Depends(get_current_user)):
+    """List pending collaborator invites for the authenticated creator."""
+    pool = await db_mod.get_pool()
+    async with pool.acquire() as conn:
+        viewer = await conn.fetchrow(
+            """
+            SELECT creator_id, email
+            FROM creators
+            WHERE creator_id = $1
+            LIMIT 1
+            """,
+            user.id,
+        )
+        if not viewer:
+            raise HTTPException(status_code=404, detail="Creator profile not found")
+
+        email = (viewer["email"] or "").strip().lower()
+        if not email:
+            return {"invites": []}
+
+        rows = await conn.fetch(
+            """
+            SELECT
+                coll.collaborator_id,
+                coll.campaign_id,
+                coll.email,
+                coll.status,
+                coll.time_created,
+                camp.title AS campaign_title,
+                camp.url AS campaign_url,
+                camp.status AS campaign_status,
+                camp.category AS campaign_category,
+                camp.funding_goal_cents,
+                camp.amount_raised_cents,
+                camp.backers,
+                camp.time_created AS campaign_time_created,
+                camp.creator_id,
+                COALESCE(NULLIF(owner.username, ''), owner.creator_id) AS creator_username,
+                owner.name AS creator_name,
+                owner.last_name AS creator_last_name,
+                owner.avatar_url AS creator_avatar_url
+            FROM collaborators coll
+            JOIN campaigns camp
+              ON camp.campaign_id = coll.campaign_id
+            JOIN creators owner
+              ON owner.creator_id = camp.creator_id
+            WHERE LOWER(coll.email) = $1
+              AND LOWER(COALESCE(coll.status, 'pending')) = 'pending'
+            ORDER BY coll.time_created DESC, coll.collaborator_id DESC
+            """,
+            email,
+        )
+
+        invites = []
+        for row in rows:
+            invites.append({
+                "collaborator_id": row["collaborator_id"],
+                "email": row["email"],
+                "status": row["status"],
+                "time_created": row["time_created"],
+                "campaign": {
+                    "campaign_id": row["campaign_id"],
+                    "title": row["campaign_title"],
+                    "url": row["campaign_url"],
+                    "status": row["campaign_status"],
+                    "category": row["campaign_category"],
+                    "funding_goal_cents": row["funding_goal_cents"],
+                    "amount_raised_cents": row["amount_raised_cents"],
+                    "backers": row["backers"],
+                    "time_created": row["campaign_time_created"],
+                    "creator_id": row["creator_id"],
+                },
+                "inviter": {
+                    "creator_id": row["creator_id"],
+                    "username": row["creator_username"],
+                    "name": row["creator_name"],
+                    "last_name": row["creator_last_name"],
+                    "avatar_url": row["creator_avatar_url"],
+                },
+            })
+        return {"invites": invites}
+
+
+@router.post("/invites/{collaborator_id}/accept")
+async def accept_collaborator_invite(
+    collaborator_id: int,
+    user: User = Depends(get_current_user),
+):
+    pool = await db_mod.get_pool()
+    async with pool.acquire() as conn:
+        viewer = await conn.fetchrow(
+            """
+            SELECT creator_id, email
+            FROM creators
+            WHERE creator_id = $1
+            LIMIT 1
+            """,
+            user.id,
+        )
+        if not viewer:
+            raise HTTPException(status_code=404, detail="Creator profile not found")
+
+        email = (viewer["email"] or "").strip().lower()
+        invite = await conn.fetchrow(
+            """
+            SELECT collaborator_id, campaign_id, email, status
+            FROM collaborators
+            WHERE collaborator_id = $1
+            LIMIT 1
+            """,
+            collaborator_id,
+        )
+        if not invite:
+            raise HTTPException(status_code=404, detail="Invite not found")
+        if (invite["email"] or "").strip().lower() != email:
+            raise HTTPException(status_code=403, detail="This invite is not for your account")
+
+        status = (invite["status"] or "pending").strip().lower()
+        if status == 'accepted':
+            return {"ok": True, "status": "accepted", "collaborator_id": collaborator_id}
+        if status == 'declined':
+            await conn.execute("DELETE FROM collaborators WHERE collaborator_id = $1", collaborator_id)
+            raise HTTPException(status_code=404, detail="Invite is no longer available")
+
+        await conn.execute(
+            """
+            UPDATE collaborators
+            SET status = 'accepted'
+            WHERE collaborator_id = $1
+            """,
+            collaborator_id,
+        )
+
+    return {"ok": True, "status": "accepted", "collaborator_id": collaborator_id}
+
+
+@router.post("/invites/{collaborator_id}/decline")
+async def decline_collaborator_invite(
+    collaborator_id: int,
+    user: User = Depends(get_current_user),
+):
+    pool = await db_mod.get_pool()
+    async with pool.acquire() as conn:
+        viewer = await conn.fetchrow(
+            """
+            SELECT creator_id, email
+            FROM creators
+            WHERE creator_id = $1
+            LIMIT 1
+            """,
+            user.id,
+        )
+        if not viewer:
+            raise HTTPException(status_code=404, detail="Creator profile not found")
+
+        email = (viewer["email"] or "").strip().lower()
+        invite = await conn.fetchrow(
+            """
+            SELECT collaborator_id, email
+            FROM collaborators
+            WHERE collaborator_id = $1
+            LIMIT 1
+            """,
+            collaborator_id,
+        )
+        if not invite:
+            raise HTTPException(status_code=404, detail="Invite not found")
+        if (invite["email"] or "").strip().lower() != email:
+            raise HTTPException(status_code=403, detail="This invite is not for your account")
+
+        await conn.execute("DELETE FROM collaborators WHERE collaborator_id = $1", collaborator_id)
+
+    return {"ok": True, "status": "declined", "collaborator_id": collaborator_id}
 
 
 @router.put("/drafts")
