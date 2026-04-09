@@ -5,11 +5,7 @@ from app.db import get_pool
 from app.models.models import User
 
 router = APIRouter(prefix="/api/saved-campaigns", tags=["saved-campaigns"])
-
-# Your schema shows saved_campaigns.engagement_type is numeric.
-# If your app uses a different numeric code for a "saved" record, change this.
 SAVED_ENGAGEMENT_TYPE = 1
-
 
 async def _get_campaign_by_url_or_id(conn, campaign_url: str):
     campaign = None
