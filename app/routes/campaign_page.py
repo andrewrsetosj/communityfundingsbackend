@@ -98,6 +98,34 @@ class EditCampaignRequest(BaseModel):
     photos: list[EditPhotoRequest] = Field(default_factory=list)
 
 
+async def _get_campaign_collaborators(conn, campaign_id: int) -> list[dict]:
+    collaborators = await conn.fetch(
+        """
+        SELECT
+            coll.collaborator_id,
+            coll.campaign_id,
+            coll.email,
+            coll.status,
+            coll.time_created,
+            cr.creator_id,
+            COALESCE(NULLIF(cr.username, ''), cr.creator_id) AS username,
+            cr.name,
+            cr.last_name,
+            cr.avatar_url,
+            cr.bio,
+            cr.user_type
+        FROM collaborators coll
+        JOIN creators cr
+          ON LOWER(cr.email) = LOWER(coll.email)
+        WHERE coll.campaign_id = $1
+          AND LOWER(COALESCE(coll.status, '')) = 'accepted'
+        ORDER BY coll.time_created ASC, coll.collaborator_id ASC
+        """,
+        campaign_id,
+    )
+    return [dict(row) for row in collaborators]
+
+
 async def _get_campaign_by_url_or_id(campaign_url: str):
     pool = await get_pool()
 
@@ -145,6 +173,59 @@ async def _get_friend_ids_for_user(conn, viewer_id: str | None) -> set[str]:
 
     return {row["friend_id"] for row in rows}
 
+
+async def _get_viewer_collaborator_status(conn, campaign_id: int, viewer_id: str | None) -> tuple[bool, bool]:
+    if not viewer_id:
+        return False, False
+
+    viewer = await conn.fetchrow(
+        """
+        SELECT email
+        FROM creators
+        WHERE creator_id = $1
+        LIMIT 1
+        """,
+        viewer_id,
+    )
+    viewer_email = ((viewer["email"] if viewer else None) or "").strip()
+    if not viewer_email:
+        return False, False
+
+    invite = await conn.fetchrow(
+        """
+        SELECT LOWER(COALESCE(status, 'pending')) AS status
+        FROM collaborators
+        WHERE campaign_id = $1
+          AND LOWER(email) = LOWER($2)
+        ORDER BY collaborator_id DESC
+        LIMIT 1
+        """,
+        campaign_id,
+        viewer_email,
+    )
+    if not invite:
+        return False, False
+
+    status = (invite["status"] or "").lower()
+    return status == "accepted", status == "pending"
+
+async def _get_viewer_saved_status(conn, campaign_id: int, viewer_id: str | None) -> bool:
+    if not viewer_id:
+        return False
+
+    saved = await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM saved_campaigns
+            WHERE creator_id = $1
+              AND campaign_id = $2
+        )
+        """,
+        viewer_id,
+        campaign_id,
+    )
+    return bool(saved)
 
 def _contains_foul_language(text: str) -> bool:
     normalized = re.sub(r"[^a-zA-Z0-9\s]", " ", text.lower())
@@ -195,6 +276,7 @@ def _validate_campaign_edit_payload(payload: EditCampaignRequest, existing_campa
                 detail="Because backers have contributed to your campaign, you can no longer edit the title, category, location, funding goal, or duration.",
             )
 
+
 def _validate_comment_text(comment_text: str) -> str:
     cleaned = comment_text.strip()
     if not cleaned:
@@ -222,10 +304,14 @@ def _decorate_comment(
     viewer_id: str | None,
     friend_ids: set[str],
     campaign_owner_id: str,
+    collaborator_ids: set[str],
 ):
     comment["is_you"] = bool(viewer_id and comment["creator_id"] == viewer_id)
     comment["is_friend"] = bool(comment["creator_id"] in friend_ids) if viewer_id else False
     comment["is_project_owner"] = comment["creator_id"] == campaign_owner_id
+    comment["is_project_collaborator"] = (
+        comment["creator_id"] in collaborator_ids and not comment["is_project_owner"]
+    )
     comment["like_count"] = int(comment.get("like_count") or 0)
     comment["liked_by_viewer"] = bool(comment.get("liked_by_viewer"))
 
@@ -240,7 +326,14 @@ def _decorate_comment(
     return comment
 
 
-async def _fetch_comment_payload(conn, comment_id: int, viewer_id: str | None, campaign_owner_id: str, friend_ids: set[str]) -> dict:
+async def _fetch_comment_payload(
+    conn,
+    comment_id: int,
+    viewer_id: str | None,
+    campaign_owner_id: str,
+    friend_ids: set[str],
+    collaborator_ids: set[str],
+) -> dict:
     row = await conn.fetchrow(
         """
         SELECT
@@ -287,7 +380,7 @@ async def _fetch_comment_payload(conn, comment_id: int, viewer_id: str | None, c
         raise HTTPException(status_code=404, detail="Comment not found")
 
     comment = dict(row)
-    comment = _decorate_comment(comment, viewer_id, friend_ids, campaign_owner_id)
+    comment = _decorate_comment(comment, viewer_id, friend_ids, campaign_owner_id, collaborator_ids)
     comment["replies"] = []
     comment["reply_count"] = 0
     comment["has_more_replies"] = False
@@ -321,6 +414,23 @@ async def get_campaign_page(
             campaign_owner_id,
         )
         creator = dict(creator) if creator else None
+        collaborators = await _get_campaign_collaborators(conn, cid)
+        collaborator_ids = {row["creator_id"] for row in collaborators if row.get("creator_id")}
+
+        is_owner = bool(viewer_id and viewer_id == campaign_owner_id)
+        is_collaborator, has_pending_invite = await _get_viewer_collaborator_status(conn, cid, viewer_id)
+        is_saved = await _get_viewer_saved_status(conn, cid, viewer_id)
+
+        can_view_campaign = bool(
+            campaign.get("status") == "active"
+            or is_owner
+            or is_collaborator
+            or has_pending_invite
+        )
+        can_comment = bool(campaign.get("status") == "active" and can_view_campaign)
+
+        if not can_view_campaign:
+            raise HTTPException(status_code=403, detail="You do not have permission to view this campaign")
 
         faqs = [
             dict(f)
@@ -429,7 +539,7 @@ async def get_campaign_page(
         )
 
         parent_comments = [
-            _decorate_comment(dict(c), viewer_id, friend_ids, campaign_owner_id)
+            _decorate_comment(dict(c), viewer_id, friend_ids, campaign_owner_id, collaborator_ids)
             for c in parent_comments
         ]
 
@@ -508,7 +618,7 @@ async def get_campaign_page(
             for row in initial_replies:
                 reply = dict(row)
                 reply.pop("rn", None)
-                reply = _decorate_comment(reply, viewer_id, friend_ids, campaign_owner_id)
+                reply = _decorate_comment(reply, viewer_id, friend_ids, campaign_owner_id, collaborator_ids)
                 replies_by_parent.setdefault(reply["parent_comment_id"], []).append(reply)
 
         comments = []
@@ -527,6 +637,7 @@ async def get_campaign_page(
     return {
         "campaign": campaign,
         "creator": creator,
+        "collaborators": collaborators,
         "faqs": faqs,
         "rewards": rewards,
         "photos": photos,
@@ -536,6 +647,16 @@ async def get_campaign_page(
             "per_page": COMMENTS_PER_PAGE,
             "total_parent_comments": total_parent_comments,
             "total_pages": total_pages,
+        },
+        "viewer_permissions": {
+            "is_owner": is_owner,
+            "is_collaborator": is_collaborator,
+            "has_pending_invite": has_pending_invite,
+            "can_view": can_view_campaign,
+            "can_comment": can_comment,
+        },
+        "viewer_engagement": {
+            "is_saved": is_saved,
         },
     }
 
@@ -571,6 +692,8 @@ async def get_comment_replies(
         viewer_id = current_user.id if current_user else None
         friend_ids = await _get_friend_ids_for_user(conn, viewer_id)
         campaign_owner_id = campaign["creator_id"]
+        collaborators = await _get_campaign_collaborators(conn, campaign["campaign_id"])
+        collaborator_ids = {row["creator_id"] for row in collaborators if row.get("creator_id")}
 
         replies = await conn.fetch(
             """
@@ -617,7 +740,7 @@ async def get_comment_replies(
         )
 
         replies = [
-            _decorate_comment(dict(r), viewer_id, friend_ids, campaign_owner_id)
+            _decorate_comment(dict(r), viewer_id, friend_ids, campaign_owner_id, collaborator_ids)
             for r in replies
         ]
 
@@ -691,12 +814,15 @@ async def create_comment(
         )
 
         friend_ids = await _get_friend_ids_for_user(conn, current_user.id)
+        collaborators = await _get_campaign_collaborators(conn, campaign["campaign_id"])
+        collaborator_ids = {row["creator_id"] for row in collaborators if row.get("creator_id")}
         comment = await _fetch_comment_payload(
             conn,
             inserted["comment_id"],
             current_user.id,
             campaign["creator_id"],
             friend_ids,
+            collaborator_ids,
         )
 
     return {"comment": comment}
@@ -744,12 +870,15 @@ async def update_comment(
         )
 
         friend_ids = await _get_friend_ids_for_user(conn, current_user.id)
+        collaborators = await _get_campaign_collaborators(conn, campaign["campaign_id"])
+        collaborator_ids = {row["creator_id"] for row in collaborators if row.get("creator_id")}
         comment = await _fetch_comment_payload(
             conn,
             comment_id,
             current_user.id,
             campaign["creator_id"],
             friend_ids,
+            collaborator_ids,
         )
 
     return {"comment": comment}
@@ -1113,6 +1242,7 @@ async def delete_comment(
 
     return {"ok": True, "comment_id": comment_id}
 
+
 @router.patch("/{campaign_url}/edit")
 async def edit_campaign(
     campaign_url: str,
@@ -1122,11 +1252,56 @@ async def edit_campaign(
     campaign = await _get_campaign_by_url_or_id(campaign_url)
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
-    if campaign["creator_id"] != current_user.id:
-        raise HTTPException(status_code=403, detail="You can only edit your own campaign")
-    _validate_campaign_edit_payload(payload)
+
     pool = await get_pool()
     async with pool.acquire() as conn:
+        viewer_id = current_user.id
+        is_owner = campaign["creator_id"] == viewer_id
+
+        viewer = await conn.fetchrow(
+            """
+            SELECT email
+            FROM creators
+            WHERE creator_id = $1
+            LIMIT 1
+            """,
+            viewer_id,
+        )
+        viewer_email = ((viewer["email"] if viewer else None) or "").strip()
+
+        is_collaborator = False
+        if viewer_email:
+            collaborator_row = await conn.fetchrow(
+                """
+                SELECT 1
+                FROM collaborators
+                WHERE campaign_id = $1
+                  AND LOWER(email) = LOWER($2)
+                  AND LOWER(COALESCE(status, '')) = 'accepted'
+                LIMIT 1
+                """,
+                campaign["campaign_id"],
+                viewer_email,
+            )
+            is_collaborator = collaborator_row is not None
+
+        if not is_owner and not is_collaborator:
+            raise HTTPException(status_code=403, detail="You do not have permission to edit this campaign")
+
+        _validate_campaign_edit_payload(payload, campaign)
+
+        if is_collaborator and not is_owner:
+            if payload.title.strip() != (campaign.get("title") or "").strip():
+                raise HTTPException(status_code=403, detail="Collaborators cannot edit the title")
+            if (payload.category or "").strip() != (campaign.get("category") or "").strip():
+                raise HTTPException(status_code=403, detail="Collaborators cannot edit the category")
+            if (payload.location or "").strip() != (campaign.get("location") or "").strip():
+                raise HTTPException(status_code=403, detail="Collaborators cannot edit the location")
+            if int(payload.funding_goal_cents) != int(campaign.get("funding_goal_cents") or 0):
+                raise HTTPException(status_code=403, detail="Collaborators cannot edit the funding goal")
+            if payload.duration_days != campaign.get("duration_days"):
+                raise HTTPException(status_code=403, detail="Collaborators cannot edit the duration")
+
         async with conn.transaction():
             updated = await conn.fetchrow(
                 """
@@ -1204,6 +1379,7 @@ async def edit_campaign(
 
     return {"ok": True, "campaign": dict(updated)}
 
+
 @router.delete("/{campaign_url}")
 async def delete_campaign(
     campaign_url: str,
@@ -1227,4 +1403,3 @@ async def delete_campaign(
             await conn.execute("DELETE FROM campaigns WHERE campaign_id = $1", campaign["campaign_id"])
 
     return {"ok": True, "campaign_id": campaign["campaign_id"]}
-
