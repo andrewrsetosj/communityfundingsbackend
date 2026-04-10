@@ -31,7 +31,6 @@ class CampaignStatus(str, enum.Enum):
     CANCELLED = "cancelled"
     SUSPENDED = "suspended"
 
-
 class DonationStatus(str, enum.Enum):
     PENDING = "pending"
     SUCCEEDED = "succeeded"

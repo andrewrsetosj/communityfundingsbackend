@@ -78,6 +78,7 @@ class UserPublicResponse(BaseModel):
     last_name: Optional[str] = None
     username: Optional[str] = None
     email: Optional[str] = None
+    user_type: Optional[int] = None
     bio: Optional[str] = None
     phone_number: Optional[str] = None
     address: Optional[str] = None
@@ -100,6 +101,7 @@ class UserProfileUpdate(BaseModel):
     state: Optional[str] = None
     time_zone: Optional[str] = None
     website: Optional[str] = None
+    user_type: Optional[int] = None
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -146,8 +148,6 @@ class CampaignResponse(BaseModel):
     funding_percentage: float = 0.0  # computed
     days_left: Optional[int] = None  # computed
     created_at: Optional[datetime] = None  # time_created
-    image_url: Optional[str] = None
-    content_type: Optional[str] = None
 
     model_config = {"from_attributes": True}
 

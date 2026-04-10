@@ -65,7 +65,6 @@ def _normalize_website(value: str | None) -> str | None:
         raise HTTPException(status_code=400, detail="Website must be a valid link")
     return cleaned
 
-
 def _public_user_response(user: User) -> UserPublicResponse:
     return UserPublicResponse(
         id=user.id,
@@ -73,6 +72,7 @@ def _public_user_response(user: User) -> UserPublicResponse:
         name=user.name,
         last_name=user.last_name,
         email=user.email,
+        user_type=user.user_type,
         bio=user.bio,
         phone_number=user.phone_number,
         address=user.address,
@@ -134,7 +134,11 @@ async def update_user_profile(
     user = result.scalar_one_or_none()
 
     if not user:
-        user = User(id=user_id, username=user_id)
+        user = User(
+            id=user_id,
+            username=user_id,
+            user_type=1,  # force individual starting acc
+        )
         db.add(user)
         await db.flush()
 
@@ -164,6 +168,10 @@ async def update_user_profile(
         if _contains_foul_language(payload["website"]):
             raise HTTPException(status_code=400, detail="Please remove profanity from website and try again")
 
+    if "user_type" in payload and payload["user_type"] is not None:
+        if payload["user_type"] not in (0, 1):
+            raise HTTPException(status_code=400, detail="user_type must be 0 or 1")
+        
     for field, value in payload.items():
         setattr(user, field, value)
 
