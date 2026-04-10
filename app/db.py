@@ -73,33 +73,13 @@ async def init_db() -> None:
 
     pool = await get_pool()
     async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS creators (
-                id serial PRIMARY KEY,
-                creator_id text UNIQUE NOT NULL,
-                user_type text,
-                name text,
-                last_name text,
-                email text,
-                time_creation timestamptz DEFAULT now(),
-                created_at timestamptz DEFAULT now()
-            );
-            """
-        )
-        # Add profile columns if they don't exist yet
-        for col, col_type in [
-            ("hashed_password", "text"),
-            ("bio", "text"),
-            ("phone_number", "text"),
-            ("address", "text"),
-            ("state", "text"),
-            ("time_zone", "text"),
-        ]:
-            await conn.execute(f"""
-                ALTER TABLE creators ADD COLUMN IF NOT EXISTS {col} {col_type};
-            """)
-    print("✅ asyncpg creators table ensured")
+        await conn.execute("SET search_path TO public")
+        exists = await conn.fetchval("SELECT EXISTS(SELECT 1 FROM pg_tables WHERE schemaname='public' AND tablename='creators')")
+        if exists:
+            print("✅ creators table already exists — skipping CREATE")
+        else:
+            print("⚠ creators table missing — ask admin to run db/schema.sql")
+    print("✅ asyncpg init_db complete")
 
 
 async def upsert_creator(

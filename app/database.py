@@ -108,7 +108,7 @@ engine = create_async_engine(
         else {
             "pool_pre_ping": True,
             "pool_recycle": 300,
-            **({"connect_args": _connect_args} if _connect_args else {}),
+            "connect_args": {**_connect_args, "server_settings": {"search_path": "public"}},
         }
     ),
 )

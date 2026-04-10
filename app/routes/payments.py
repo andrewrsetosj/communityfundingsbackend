@@ -61,8 +61,8 @@ async def create_checkout_session(
 
     # Create pending donation record
     donation = Donation(
-        campaign_id=data.campaign_id,
-        donor_id=user.id if user else None,
+        campaign_id=int(data.campaign_id),
+        donor_id=user.id if user else "anonymous",
         donor_name=data.donor_name or (user.name if user else "Anonymous"),
         donor_email=data.donor_email or (user.email if user else None),
         is_anonymous=data.is_anonymous,
@@ -70,13 +70,13 @@ async def create_checkout_session(
         amount=Decimal(str(data.amount)),
         platform_fee=Decimal(str(platform_fee)),
         net_amount=Decimal(str(net_amount)),
-        status=DonationStatus.PENDING,
+        status="pending",
     )
     db.add(donation)
     await db.flush()
 
-    success_url = data.success_url or f"{FRONTEND_URL}/campaigns/{campaign.slug}/thank-you?session_id={{CHECKOUT_SESSION_ID}}"
-    cancel_url = data.cancel_url or f"{FRONTEND_URL}/campaigns/{campaign.slug}"
+    success_url = data.success_url or f"{FRONTEND_URL}/donation-receipt?donation_id={donation.id}&campaign_id={campaign.id}"
+    cancel_url = data.cancel_url or f"{FRONTEND_URL}/project/{campaign.id}"
 
     # Build Stripe session params
     session_params = {
@@ -149,8 +149,8 @@ async def create_payment_intent(
     net_amount = round(data.amount - platform_fee, 2)
 
     donation = Donation(
-        campaign_id=data.campaign_id,
-        donor_id=user.id if user else None,
+        campaign_id=int(data.campaign_id),
+        donor_id=user.id if user else "anonymous",
         donor_name=data.donor_name or (user.name if user else "Anonymous"),
         donor_email=data.donor_email or (user.email if user else None),
         is_anonymous=data.is_anonymous,
@@ -158,7 +158,7 @@ async def create_payment_intent(
         amount=Decimal(str(data.amount)),
         platform_fee=Decimal(str(platform_fee)),
         net_amount=Decimal(str(net_amount)),
-        status=DonationStatus.PENDING,
+        status="pending",
     )
     db.add(donation)
     await db.flush()
@@ -421,7 +421,7 @@ async def request_payout(
     db: AsyncSession = Depends(get_db),
 ):
     """Creator requests payout of raised funds for a campaign."""
-    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    result = await db.execute(select(Campaign).where(Campaign.id == int(campaign_id)))
     campaign = result.scalar_one_or_none()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -433,7 +433,7 @@ async def request_payout(
     # Calculate available amount (succeeded donations minus already-paid-out)
     donations_result = await db.execute(
         select(Donation)
-        .where(Donation.campaign_id == campaign_id, Donation.status == DonationStatus.SUCCEEDED)
+        .where(Donation.campaign_id == int(campaign_id), Donation.status == DonationStatus.SUCCEEDED)
     )
     total_net = sum(float(d.net_amount or 0) for d in donations_result.scalars().all())
 
@@ -490,7 +490,7 @@ async def get_payouts(
     db: AsyncSession = Depends(get_db),
 ):
     """Get payout history for a campaign."""
-    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    result = await db.execute(select(Campaign).where(Campaign.id == int(campaign_id)))
     campaign = result.scalar_one_or_none()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -523,7 +523,7 @@ async def get_campaign_donations(
     """Get all donations for a campaign (public — hides anonymous emails)."""
     result = await db.execute(
         select(Donation)
-        .where(Donation.campaign_id == campaign_id, Donation.status == DonationStatus.SUCCEEDED)
+        .where(Donation.campaign_id == int(campaign_id), Donation.status == DonationStatus.SUCCEEDED)
         .order_by(Donation.created_at.desc())
     )
     donations = result.scalars().all()
@@ -632,3 +632,34 @@ async def detach_payment_method(pm_id: str, user: User = Depends(get_current_use
         return {"deleted": True}
     except stripe.error.StripeError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@router.get("/donation/{donation_id}")
+async def get_donation(donation_id: int, db: AsyncSession = Depends(get_db)):
+    """Get a single donation by ID for receipt display."""
+    from sqlalchemy import text
+    result = await db.execute(
+        text("""
+            SELECT d.donation_id, d.amount, d.status, d.time_created, d.donor_name,
+                   d.donor_email, d.campaign_id, d.currency, d.platform_fee, d.net_amount,
+                   c.title as campaign_title, cr.name as creator_name
+            FROM donations d
+            JOIN campaigns c ON c.campaign_id = d.campaign_id
+            LEFT JOIN creators cr ON cr.creator_id = c.creator_id
+            WHERE d.donation_id = :did
+        """),
+        {"did": donation_id},
+    )
+    row = result.mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Donation not found")
+    return {
+        "donation_id": row["donation_id"],
+        "amount": float(row["amount"]),
+        "status": row["status"],
+        "created_at": str(row["time_created"]),
+        "donor_name": row["donor_name"],
+        "campaign_id": row["campaign_id"],
+        "campaign_title": row["campaign_title"],
+        "creator_name": row["creator_name"],
+        "currency": row["currency"],
+    }

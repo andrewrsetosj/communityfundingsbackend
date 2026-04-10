@@ -33,6 +33,7 @@ from app.routes.refunds import router as refunds_router
 from app.routes.users import router as users_router
 from app.routes.updates import router as updates_router
 from app.routes.comments import router as comments_router
+from app.routes.ledger import router as ledger_router
 from app.routes.reports import router as reports_router
 from app.routes.uploads import router as uploads_router
 from app.routes.campaign_page import router as campaign_page_router
@@ -95,6 +96,7 @@ app.include_router(refunds_router)
 app.include_router(users_router)
 app.include_router(updates_router)
 app.include_router(comments_router)
+app.include_router(ledger_router)
 app.include_router(reports_router)
 app.include_router(uploads_router)
 app.include_router(admin_router)

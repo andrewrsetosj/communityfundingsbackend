@@ -54,7 +54,7 @@ def build_campaign_response(c: Campaign, creator_name: Optional[str] = None) -> 
         donors_count=c.donors_count or 0,
         category=c.category, location=c.location,
         end_date=c.end_date,
-        bio=c.bio, duration_days=c.duration_days,
+        duration_days=c.duration_days,
         funding_percentage=pct, days_left=days_left,
         created_at=c.created_at,
     )
@@ -259,7 +259,7 @@ async def get_campaign(campaign_id_or_slug: str, db: AsyncSession = Depends(get_
     """Get campaign by ID or URL slug."""
     result = await db.execute(
         select(Campaign).options(selectinload(Campaign.creator)).where(
-            or_(Campaign.id == campaign_id_or_slug, Campaign.slug == campaign_id_or_slug)
+            or_(Campaign.id == int(campaign_id_or_slug) if campaign_id_or_slug.isdigit() else False, Campaign.slug == campaign_id_or_slug)
         )
     )
     campaign = result.scalar_one_or_none()
@@ -311,7 +311,7 @@ async def update_campaign(
     db: AsyncSession = Depends(get_db),
 ):
     """Edit a campaign. Only the creator can edit. Cannot edit funded/cancelled campaigns."""
-    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    result = await db.execute(select(Campaign).where(Campaign.id == int(campaign_id)))
     campaign = result.scalar_one_or_none()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -344,7 +344,7 @@ async def publish_campaign(
     db: AsyncSession = Depends(get_db),
 ):
     """Publish a draft campaign (makes it active and accepting donations)."""
-    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    result = await db.execute(select(Campaign).where(Campaign.id == int(campaign_id)))
     campaign = result.scalar_one_or_none()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -368,7 +368,7 @@ async def cancel_campaign(
 ):
     """Cancel a campaign. Only creator. Cannot cancel if already funded."""
     result = await db.execute(
-        select(Campaign).where(Campaign.id == campaign_id)
+        select(Campaign).where(Campaign.id == int(campaign_id))
     )
     campaign = result.scalar_one_or_none()
     if not campaign:

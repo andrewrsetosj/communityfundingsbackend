@@ -26,7 +26,7 @@ router = APIRouter(prefix="/api/campaigns/{campaign_id}/comments", tags=["commen
 
 async def _get_campaign_or_404(campaign_id: str, db: AsyncSession) -> Campaign:
     """Fetch campaign by ID; raise 404 if not found."""
-    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    result = await db.execute(select(Campaign).where(Campaign.id == int(campaign_id)))
     campaign = result.scalar_one_or_none()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -46,7 +46,7 @@ async def list_comments(
     result = await db.execute(
         select(Comment)
         .options(selectinload(Comment.user))
-        .where(Comment.campaign_id == campaign_id, Comment.is_hidden == False)
+        .where(Comment.campaign_id == int(campaign_id), Comment.is_hidden == False)
         .order_by(Comment.created_at.desc())
         .offset(offset)
         .limit(limit)
@@ -56,10 +56,10 @@ async def list_comments(
         CommentResponse(
             id=c.id,
             campaign_id=c.campaign_id,
-            user_id=c.user_id,
+            creator_id=c.user_id,
             user_name=c.user.name if c.user else "Unknown",
             user_avatar=c.user.avatar_url if c.user else None,
-            content=c.content,
+            comment_text=c.content,
             created_at=c.created_at,
         )
         for c in comments
@@ -76,7 +76,7 @@ async def comment_count(
     """Get total visible comment count for a campaign."""
     result = await db.execute(
         select(sqlfunc.count(Comment.id)).where(
-            Comment.campaign_id == campaign_id,
+            Comment.campaign_id == int(campaign_id),
             Comment.is_hidden == False,
         )
     )
@@ -98,7 +98,7 @@ async def create_comment(
     await _get_campaign_or_404(campaign_id, db)
 
     comment = Comment(
-        campaign_id=campaign_id,
+        campaign_id=int(campaign_id),
         user_id=user.id,
         content=data.content,
     )
@@ -108,10 +108,10 @@ async def create_comment(
     return CommentResponse(
         id=comment.id,
         campaign_id=comment.campaign_id,
-        user_id=comment.user_id,
+        creator_id=comment.user_id,
         user_name=user.name,
         user_avatar=user.avatar_url,
-        content=comment.content,
+        comment_text=comment.content,
         created_at=comment.created_at,
     )
 
@@ -129,7 +129,7 @@ async def delete_comment(
     result = await db.execute(
         select(Comment).where(
             Comment.id == comment_id,
-            Comment.campaign_id == campaign_id,
+            Comment.campaign_id == int(campaign_id),
         )
     )
     comment = result.scalar_one_or_none()
