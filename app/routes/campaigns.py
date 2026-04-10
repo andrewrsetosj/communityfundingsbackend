@@ -126,6 +126,17 @@ async def list_campaigns(
     offset = (page - 1) * per_page
 
     async with pool.acquire() as conn:
+
+        await conn.execute(
+            """
+            UPDATE campaigns
+            SET status = 'inactive'
+            WHERE status = 'active'
+            AND end_date IS NOT NULL
+            AND end_date <= NOW()
+            """
+        )
+        
         count_row = await conn.fetchrow(
             f"""
             SELECT COUNT(*) AS total
