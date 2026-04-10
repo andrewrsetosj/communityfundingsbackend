@@ -15,6 +15,10 @@ class ReportProfileRequest(BaseModel):
     notes: str | None = Field(default=None, max_length=2000)
 
 
+class UpdatePinnedCampaignRequest(BaseModel):
+    campaign_id: int | None = None
+
+
 async def _get_creator_profile(conn, creator_id_or_username: str) -> dict | None:
     creator = await conn.fetchrow(
         """
@@ -28,7 +32,8 @@ async def _get_creator_profile(conn, creator_id_or_username: str) -> dict | None
             website,
             avatar_url,
             email,
-            time_creation
+            time_creation,
+            pinned_campaign_id
         FROM creators
         WHERE creator_id = $1
            OR LOWER(COALESCE(username, '')) = LOWER($1)
@@ -269,6 +274,57 @@ async def get_profile_page(creator_id_or_username: str, current_user: User | Non
         "collaborations": collaborations,
         "activities": activities,
     }
+
+
+@router.put("/me/pinned-campaign")
+async def update_pinned_campaign(
+    payload: UpdatePinnedCampaignRequest,
+    current_user: User = Depends(get_current_user),
+):
+    pool = await get_pool()
+
+    async with pool.acquire() as conn:
+        if payload.campaign_id is None:
+            await conn.execute(
+                """
+                UPDATE creators
+                SET pinned_campaign_id = NULL
+                WHERE creator_id = $1
+                """,
+                current_user.id,
+            )
+            return {"ok": True, "pinned_campaign_id": None}
+
+        campaign = await conn.fetchrow(
+            """
+            SELECT campaign_id, creator_id, status
+            FROM campaigns
+            WHERE campaign_id = $1
+            LIMIT 1
+            """,
+            payload.campaign_id,
+        )
+
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+
+        if campaign["creator_id"] != current_user.id:
+            raise HTTPException(status_code=403, detail="You can only pin your own campaigns")
+
+        if (campaign["status"] or "").lower() != "active":
+            raise HTTPException(status_code=400, detail="Only active campaigns can be pinned")
+
+        await conn.execute(
+            """
+            UPDATE creators
+            SET pinned_campaign_id = $2
+            WHERE creator_id = $1
+            """,
+            current_user.id,
+            payload.campaign_id,
+        )
+
+    return {"ok": True, "pinned_campaign_id": payload.campaign_id}
 
 
 @router.post("/{creator_id_or_username}/report")
