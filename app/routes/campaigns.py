@@ -33,8 +33,12 @@ def slugify(text: str) -> str:
     slug = re.sub(r"-+", "-", slug).strip("-")
     return slug[:200]
 
-
-def build_campaign_response(c: Campaign, creator_name: Optional[str] = None) -> CampaignResponse:
+def build_campaign_response(
+    c: Campaign,
+    creator_name: Optional[str] = None,
+    image_url: Optional[str] = None,
+    content_type: Optional[str] = None,
+) -> CampaignResponse:
     goal = float(c.goal_amount) if c.goal_amount else 0
     raised = float(c.raised_amount) if c.raised_amount else 0
     pct = round(raised / goal * 100, 1) if goal > 0 else 0.0
@@ -46,18 +50,26 @@ def build_campaign_response(c: Campaign, creator_name: Optional[str] = None) -> 
         days_left = max(0, delta.days)
 
     return CampaignResponse(
-        id=c.id, title=c.title, slug=c.slug,
+        id=c.id,
+        title=c.title,
+        slug=c.slug,
         description=c.description,
-        goal_amount=goal, raised_amount=raised,
+        goal_amount=goal,
+        raised_amount=raised,
         creator_id=c.creator_id,
         creator_name=creator_name or (c.creator.name if c.creator else None),
         status=c.status,
         donors_count=c.donors_count or 0,
-        category=c.category, location=c.location,
+        category=c.category,
+        location=c.location,
         end_date=c.end_date,
-        bio=c.bio, duration_days=c.duration_days,
-        funding_percentage=pct, days_left=days_left,
+        bio=c.bio,
+        duration_days=c.duration_days,
+        funding_percentage=pct,
+        days_left=days_left,
         created_at=c.created_at,
+        image_url=image_url,
+        content_type=content_type,
     )
 
 
@@ -69,51 +81,124 @@ async def list_campaigns(
     category: Optional[str] = None,
     location: Optional[str] = None,
     q: Optional[str] = None,
-    sort: Optional[str] = "recent",  # recent | popular | ending_soon | most_funded
+    sort: Optional[str] = "recent",
     featured: Optional[bool] = None,
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=12, le=50),
-    db: AsyncSession = Depends(get_db),
 ):
-    """List campaigns with filtering, search, and sorting."""
-    query = select(Campaign).options(selectinload(Campaign.creator))
+    pool = await db_mod.get_pool()
 
-    # Filters
+    where_clauses = []
+    params = []
+    param_index = 1
+
     if status:
-        query = query.where(Campaign.status == status)
+        where_clauses.append(f"c.status = ${param_index}")
+        params.append(status)
+        param_index += 1
+
     if category:
-        query = query.where(Campaign.category == category)
+        where_clauses.append(f"c.category = ${param_index}")
+        params.append(category)
+        param_index += 1
+
     if location:
-        query = query.where(Campaign.location.ilike(f"%{location}%"))
+        where_clauses.append(f"c.location ILIKE ${param_index}")
+        params.append(f"%{location}%")
+        param_index += 1
+
     if q:
-        search = f"%{q}%"
-        query = query.where(
-            or_(Campaign.title.ilike(search), Campaign.description.ilike(search))
-        )
+        where_clauses.append(f"(c.title ILIKE ${param_index} OR c.description_html ILIKE ${param_index})")
+        params.append(f"%{q}%")
+        param_index += 1
 
-    # Count total
-    count_q = select(sqlfunc.count()).select_from(query.subquery())
-    total = (await db.execute(count_q)).scalar() or 0
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
-    # Sort
     if sort == "popular":
-        query = query.order_by(Campaign.donors_count.desc())
+        order_sql = "ORDER BY c.backers DESC, c.time_created DESC"
     elif sort == "ending_soon":
-        query = query.where(Campaign.end_date.isnot(None)).order_by(Campaign.end_date.asc())
+        order_sql = "ORDER BY c.end_date ASC NULLS LAST, c.time_created DESC"
     elif sort == "most_funded":
-        query = query.order_by(Campaign.raised_amount.desc())
+        order_sql = "ORDER BY c.amount_raised_cents DESC, c.time_created DESC"
     else:
-        query = query.order_by(Campaign.created_at.desc())
+        order_sql = "ORDER BY c.time_created DESC, c.campaign_id DESC"
 
     offset = (page - 1) * per_page
-    query = query.offset(offset).limit(per_page)
 
-    result = await db.execute(query)
-    campaigns = result.scalars().all()
+    async with pool.acquire() as conn:
+        count_row = await conn.fetchrow(
+            f"""
+            SELECT COUNT(*) AS total
+            FROM campaigns c
+            {where_sql}
+            """,
+            *params,
+        )
+        total = count_row["total"] if count_row else 0
+
+        rows = await conn.fetch(
+            f"""
+            SELECT
+                c.campaign_id AS id,
+                c.title,
+                c.url AS slug,
+                c.description_html AS description,
+                COALESCE(c.funding_goal_cents, 0) / 100.0 AS goal_amount,
+                COALESCE(c.amount_raised_cents, 0) / 100.0 AS raised_amount,
+                c.creator_id,
+                creator.name AS creator_name,
+                c.status,
+                COALESCE(c.backers, 0) AS donors_count,
+                c.category,
+                c.location,
+                c.end_date,
+                c.bio,
+                c.duration_days,
+                CASE
+                    WHEN COALESCE(c.funding_goal_cents, 0) > 0
+                    THEN ROUND((COALESCE(c.amount_raised_cents, 0)::numeric / c.funding_goal_cents::numeric) * 100, 1)
+                    ELSE 0
+                END AS funding_percentage,
+                CASE
+                    WHEN c.duration_days IS NULL OR c.time_created IS NULL THEN NULL
+                    ELSE GREATEST(0, c.duration_days - FLOOR(EXTRACT(EPOCH FROM (NOW() - c.time_created)) / 86400.0)::int)
+                END AS days_left,
+                c.time_created AS created_at,
+                cp.content_type,
+                CASE
+                    WHEN cp.s3_bucket IS NOT NULL AND cp.s3_key IS NOT NULL
+                    THEN 'https://' || cp.s3_bucket || '.s3.us-east-2.amazonaws.com/' || cp.s3_key
+                    ELSE NULL
+                END AS image_url
+            FROM campaigns c
+            LEFT JOIN creators creator
+              ON creator.creator_id = c.creator_id
+            LEFT JOIN LATERAL (
+                SELECT
+                    photo_id,
+                    s3_bucket,
+                    s3_key,
+                    content_type,
+                    is_primary
+                FROM campaign_photos
+                WHERE campaign_id = c.campaign_id
+                ORDER BY is_primary DESC, photo_id ASC
+                LIMIT 1
+            ) cp ON true
+            {where_sql}
+            {order_sql}
+            LIMIT ${param_index} OFFSET ${param_index + 1}
+            """,
+            *params,
+            per_page,
+            offset,
+        )
 
     return CampaignListResponse(
-        campaigns=[build_campaign_response(c) for c in campaigns],
-        total=total, page=page, per_page=per_page,
+        campaigns=[dict(row) for row in rows],
+        total=total,
+        page=page,
+        per_page=per_page,
     )
 
 

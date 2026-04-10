@@ -146,6 +146,8 @@ class CampaignResponse(BaseModel):
     funding_percentage: float = 0.0  # computed
     days_left: Optional[int] = None  # computed
     created_at: Optional[datetime] = None  # time_created
+    image_url: Optional[str] = None
+    content_type: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
