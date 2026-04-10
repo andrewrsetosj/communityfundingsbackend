@@ -13,8 +13,8 @@ from app.models.models import User
 
 router = APIRouter(prefix="/api/uploads", tags=["uploads"])
 
-S3_BUCKET = os.getenv("AWS_S3_BUCKET", "community-fundings-uploads")
-AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+S3_BUCKET = os.getenv("AWS_S3_BUCKET", "community-fundings-assets")
+AWS_REGION = os.getenv("AWS_REGION", "us-east-2")
 # Object key prefix inside the bucket, e.g. "Campaigns" -> Campaigns/{campaign_id}/{uuid}.jpg
 S3_KEY_PREFIX = (os.getenv("S3_KEY_PREFIX") or "Campaigns").strip().strip("/")
 
