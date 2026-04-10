@@ -5,6 +5,8 @@ Auth routes — register, login, profile, password change
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
+from pydantic import BaseModel
+from typing import Optional
 
 from app.database import get_db
 from app.auth import hash_password, verify_password, create_access_token, get_current_user
@@ -36,8 +38,13 @@ async def register(data: RegisterRequest, db: AsyncSession = Depends(get_db)):
     return TokenResponse(
         access_token=token,
         user=UserResponse(
-            id=user.id, email=user.email, name=user.name,
-            email_verified=False, stripe_connect_onboarded=False,
+            id=user.id,
+            email=user.email,
+            name=user.name,
+            avatar_url=user.avatar_url,
+            bio=user.bio,
+            email_verified=user.email_verified,
+            stripe_connect_onboarded=user.stripe_connect_onboarded,
             created_at=user.created_at,
         ),
     )
@@ -53,11 +60,15 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     token = create_access_token(user.id)
+
     return TokenResponse(
         access_token=token,
         user=UserResponse(
-            id=user.id, email=user.email, name=user.name,
-            avatar_url=user.avatar_url, bio=user.bio,
+            id=user.id,
+            email=user.email,
+            name=user.name,
+            avatar_url=user.avatar_url,
+            bio=user.bio,
             email_verified=user.email_verified,
             stripe_connect_onboarded=user.stripe_connect_onboarded,
             created_at=user.created_at,
@@ -69,12 +80,16 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
 async def get_me(user: User = Depends(get_current_user)):
     """Get current authenticated user profile."""
     return UserResponse(
-        id=user.id, email=user.email, name=user.name,
-        avatar_url=user.avatar_url, bio=user.bio,
+        id=user.id,
+        email=user.email,
+        name=user.name,
+        avatar_url=user.avatar_url,
+        bio=user.bio,
         email_verified=user.email_verified,
         stripe_connect_onboarded=user.stripe_connect_onboarded,
         created_at=user.created_at,
     )
+
 
 @router.put("/me", response_model=UserResponse)
 async def update_me(
@@ -89,11 +104,15 @@ async def update_me(
         user.bio = data.bio
     if data.avatar_url is not None:
         user.avatar_url = data.avatar_url
+
     await db.flush()
 
     return UserResponse(
-        id=user.id, email=user.email, name=user.name,
-        avatar_url=user.avatar_url, bio=user.bio,
+        id=user.id,
+        email=user.email,
+        name=user.name,
+        avatar_url=user.avatar_url,
+        bio=user.bio,
         email_verified=user.email_verified,
         stripe_connect_onboarded=user.stripe_connect_onboarded,
         created_at=user.created_at,
@@ -109,11 +128,9 @@ async def change_password(
     """Change the authenticated user's password."""
     if not verify_password(data.current_password, user.hashed_password):
         raise HTTPException(status_code=400, detail="Current password is incorrect")
+
     user.hashed_password = hash_password(data.new_password)
     await db.flush()
-    return {"message": "Password updated"}
-    
-from pydantic import BaseModel as PydanticBaseModel
 
 class ClerkSyncRequest(PydanticBaseModel):
     clerk_id: str = ""

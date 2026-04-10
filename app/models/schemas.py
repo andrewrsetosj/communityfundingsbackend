@@ -49,11 +49,14 @@ class UserUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     last_name: Optional[str] = None
     bio: Optional[str] = None
+    website: Optional[str] = None
+    username: Optional[str] = None
 
 
 class UserResponse(BaseModel):
     id: str
     email: Optional[str] = None
+    username: Optional[str] = None
     name: Optional[str] = None
     last_name: Optional[str] = None
     user_type: Optional[int] = None
@@ -71,6 +74,7 @@ class UserPublicResponse(BaseModel):
     id: str
     name: Optional[str] = None
     last_name: Optional[str] = None
+    username: Optional[str] = None
     email: Optional[str] = None
     bio: Optional[str] = None
     avatar_url: Optional[str] = None
@@ -85,6 +89,7 @@ class UserProfileUpdate(BaseModel):
     """Fields the user can update on their profile."""
     name: Optional[str] = None
     last_name: Optional[str] = None
+    username: Optional[str] = Field(None, min_length=3, max_length=30)
     bio: Optional[str] = None
     avatar_url: Optional[str] = None
     email_verified: bool = False
@@ -132,6 +137,8 @@ class CampaignResponse(BaseModel):
     funding_percentage: float = 0.0  # computed
     days_left: Optional[int] = None  # computed
     created_at: Optional[datetime] = None  # time_created
+    image_url: Optional[str] = None
+    content_type: Optional[str] = None
 
     model_config = {"from_attributes": True}
 

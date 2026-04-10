@@ -7,7 +7,7 @@ import os
 import re
 import ssl
 from datetime import datetime, timezone, timedelta
-from typing import Any
+from typing import Any, Iterable
 
 import asyncpg
 
@@ -152,7 +152,7 @@ async def get_platform_stats() -> dict[str, Any]:
     pool = await get_pool()
     async with pool.acquire() as conn:
         funded_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM public.campaigns WHERE status = 'funded'"
+            "SELECT COUNT(*) FROM public.campaigns WHERE status = 'active' AND amount_raised_cents > 100"
         ) or 0
 
         total_raised = await conn.fetchval(
@@ -168,6 +168,198 @@ async def get_platform_stats() -> dict[str, Any]:
         "total_raised_cents": int(total_raised),
         "total_pledges": int(total_donations),
     }
+
+
+def _campaign_photo_public_url(s3_bucket: str, s3_key: str) -> str:
+    region = (os.getenv("AWS_REGION") or "us-east-2").strip()
+    return f"https://{s3_bucket}.s3.{region}.amazonaws.com/{s3_key}"
+
+
+async def replace_campaign_photos_conn(
+    conn: asyncpg.Connection,
+    campaign_id: int,
+    creator_id: str,
+    photos: Iterable[dict[str, Any]],
+) -> None:
+    photo_list = list(photos)
+
+    row = await conn.fetchrow(
+        """
+        SELECT creator_id, status FROM public.campaigns
+        WHERE campaign_id = $1
+        LIMIT 1
+        """,
+        campaign_id,
+    )
+    if not row:
+        raise ValueError("Campaign not found")
+    if str(row["creator_id"]) != str(creator_id):
+        raise ValueError("Campaign not found or not owned by this user")
+    if str(row["status"]) not in ("draft", "pending_review"):
+        raise ValueError("Photos can only be updated for draft or pending-review campaigns")
+
+    await conn.execute(
+        "DELETE FROM public.campaign_photos WHERE campaign_id = $1",
+        campaign_id,
+    )
+
+    insert_sql = """
+        INSERT INTO public.campaign_photos (
+            campaign_id, s3_bucket, s3_key, content_type,
+            is_primary, sort_order, uploaded_by_creator_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+    """
+
+    for i, p in enumerate(photo_list):
+        bucket = str((p or {}).get("s3_bucket") or "").strip()
+        key = str((p or {}).get("s3_key") or "").strip()
+        if not bucket or not key:
+            continue
+        ctype = str((p or {}).get("content_type") or "image/jpeg").strip() or "image/jpeg"
+        is_primary = bool((p or {}).get("is_primary", False))
+        sort_order = int((p or {}).get("sort_order", i))
+        await conn.execute(
+            insert_sql,
+            campaign_id,
+            bucket,
+            key,
+            ctype,
+            is_primary,
+            sort_order,
+            creator_id,
+        )
+
+    primaries = await conn.fetch(
+        """
+        SELECT photo_id FROM public.campaign_photos
+        WHERE campaign_id = $1 AND is_primary = TRUE
+        ORDER BY sort_order, photo_id
+        """,
+        campaign_id,
+    )
+    if len(primaries) > 1:
+        for extra in primaries[1:]:
+            await conn.execute(
+                "UPDATE public.campaign_photos SET is_primary = FALSE WHERE photo_id = $1",
+                extra["photo_id"],
+            )
+    rows_left = await conn.fetch(
+        "SELECT photo_id FROM public.campaign_photos WHERE campaign_id = $1 ORDER BY sort_order, photo_id",
+        campaign_id,
+    )
+    primaries_after = await conn.fetch(
+        """
+        SELECT photo_id FROM public.campaign_photos
+        WHERE campaign_id = $1 AND is_primary = TRUE
+        ORDER BY sort_order, photo_id
+        """,
+        campaign_id,
+    )
+    if rows_left and len(primaries_after) == 0:
+        await conn.execute(
+            "UPDATE public.campaign_photos SET is_primary = TRUE WHERE photo_id = $1",
+            rows_left[0]["photo_id"],
+        )
+
+
+async def replace_campaign_photos(
+    campaign_id: int,
+    creator_id: str,
+    photos: Iterable[dict[str, Any]],
+) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await replace_campaign_photos_conn(conn, campaign_id, creator_id, photos)
+
+
+async def _upsert_bank_details_encrypted(
+    conn: asyncpg.Connection,
+    campaign_id: int,
+    creator_id: str,
+    payment: dict[str, Any],
+) -> None:
+    """
+    Store one row per campaign in public.bank_details.
+    The Fernet ciphertext (JSON blob) is stored in column fermat_key.
+    Plaintext account_type is stored for simple filtering.
+    """
+    from app.bank_crypto import encrypt_bank_payload
+
+    row = await conn.fetchrow(
+        "SELECT creator_id FROM public.campaigns WHERE campaign_id = $1",
+        campaign_id,
+    )
+    if not row or str(row["creator_id"]) != str(creator_id):
+        raise ValueError("Campaign not found or not owned by this user")
+
+    routing = str(payment.get("routing_number") or "").strip()
+    account = str(payment.get("account_number") or "").strip()
+    if not routing or not account:
+        return
+
+    holder = str(payment.get("account_holder_name") or "").strip()
+    acct_type = str(payment.get("account_type") or "individual").strip()
+    if acct_type not in ("individual", "business"):
+        acct_type = "individual"
+    contact_email = str(payment.get("contact_email") or "").strip()
+
+    payload = {
+        "routing_number": routing,
+        "account_number": account,
+        "account_holder_name": holder,
+        "account_type": acct_type,
+        "contact_email": contact_email,
+    }
+    token = encrypt_bank_payload(payload)
+
+    await conn.execute(
+        "DELETE FROM public.bank_details WHERE campaign_id = $1",
+        campaign_id,
+    )
+    try:
+        await conn.execute(
+            """
+            INSERT INTO public.bank_details (campaign_id, fermat_key, account_type)
+            VALUES ($1, $2, $3)
+            """,
+            campaign_id,
+            token,
+            acct_type,
+        )
+    except Exception as e:
+        err = str(e).lower()
+        if "too long" in err or "character varying" in err:
+            raise ValueError(
+                "Database column fermat_key (or routing_number before migration) is too short "
+                "for encrypted bank data (must be TEXT). Run "
+                "backend/db/migrations/001_bank_details_ciphertext.sql if needed, then "
+                "002_bank_details_drop_account_rename_routing.sql, then retry."
+            ) from e
+        raise
+
+
+async def get_bank_details_decrypted(campaign_id: int) -> dict[str, Any] | None:
+    """
+    Decrypt stored bank details for payouts or admin (requires BANK_ENCRYPTION_KEY).
+    Returns None if no row or empty token.
+    """
+    from app.bank_crypto import decrypt_bank_payload
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT fermat_key
+            FROM public.bank_details
+            WHERE campaign_id = $1
+            """,
+            campaign_id,
+        )
+    if not row or not row["fermat_key"]:
+        return None
+    return decrypt_bank_payload(str(row["fermat_key"]))
 
 
 async def _ensure_creator_exists(conn: asyncpg.Connection, creator_id: str, bio: str | None) -> None:
@@ -237,6 +429,7 @@ async def finalize_campaign(data: dict[str, Any]) -> dict[str, Any]:
 
     url = _slug(data.get("vanity_slug") or title) or _slug(title)
     existing_campaign_id = data.get("campaign_id")
+    collaborator_invite_emails: list[str] = []
 
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -306,6 +499,17 @@ async def finalize_campaign(data: dict[str, Any]) -> dict[str, Any]:
             # Delete + re-insert related rows
             await conn.execute("DELETE FROM public.faqs WHERE campaign_id = $1", campaign_id)
             await conn.execute("DELETE FROM public.rewards WHERE campaign_id = $1", campaign_id)
+
+            prev_collab = await conn.fetch(
+                """
+                SELECT lower(trim(email)) AS email
+                FROM public.collaborators
+                WHERE campaign_id = $1
+                """,
+                campaign_id,
+            )
+            previous_collab_emails = {r["email"] for r in prev_collab if r.get("email")}
+
             await conn.execute("DELETE FROM public.collaborators WHERE campaign_id = $1", campaign_id)
 
             # FAQs
@@ -363,6 +567,26 @@ async def finalize_campaign(data: dict[str, Any]) -> dict[str, Any]:
                     collaborator_rows,
                 )
 
+            collaborator_invite_emails = list(seen_emails - previous_collab_emails)
+
+            if "photos" in data:
+                await replace_campaign_photos_conn(
+                    conn, campaign_id, creator_id, data.get("photos") or []
+                )
+
+            payment = data.get("payment")
+            if payment and isinstance(payment, dict):
+                await _upsert_bank_details_encrypted(
+                    conn, campaign_id, creator_id, payment
+                )
+
+    if collaborator_invite_emails:
+        from app.collaborator_invites import send_collaborator_invite_emails
+
+        await send_collaborator_invite_emails(
+            collaborator_invite_emails, title, campaign_id, creator_id
+        )
+
     return {"campaign_id": row["campaign_id"], "slug": row["url"] or url}
 
 
@@ -391,6 +615,7 @@ async def upsert_draft_campaign(data: dict[str, Any]) -> dict[str, Any]:
     duration_days_val = int(duration_days) if duration_days else None
     bio = (data.get("bio") or "").strip() or None
     campaign_id = data.get("campaign_id")
+    collaborator_invite_emails: list[str] = []
 
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -444,6 +669,17 @@ async def upsert_draft_campaign(data: dict[str, Any]) -> dict[str, Any]:
             # Delete + re-insert related rows
             await conn.execute("DELETE FROM public.faqs WHERE campaign_id = $1", campaign_id)
             await conn.execute("DELETE FROM public.rewards WHERE campaign_id = $1", campaign_id)
+
+            prev_collab = await conn.fetch(
+                """
+                SELECT lower(trim(email)) AS email
+                FROM public.collaborators
+                WHERE campaign_id = $1
+                """,
+                campaign_id,
+            )
+            previous_collab_emails = {r["email"] for r in prev_collab if r.get("email")}
+
             await conn.execute("DELETE FROM public.collaborators WHERE campaign_id = $1", campaign_id)
 
             # FAQs
@@ -501,6 +737,15 @@ async def upsert_draft_campaign(data: dict[str, Any]) -> dict[str, Any]:
                     collaborator_rows,
                 )
 
+            collaborator_invite_emails = list(seen_emails - previous_collab_emails)
+
+    if collaborator_invite_emails:
+        from app.collaborator_invites import send_collaborator_invite_emails
+
+        await send_collaborator_invite_emails(
+            collaborator_invite_emails, title, campaign_id, creator_id
+        )
+
     return {"campaign_id": campaign_id, "slug": row["url"] or url}
 
 
@@ -535,6 +780,30 @@ async def get_draft_campaign(campaign_id: int, creator_id: str) -> dict[str, Any
             "SELECT email FROM public.collaborators WHERE campaign_id = $1",
             campaign_id,
         )
+        photos = await conn.fetch(
+            """
+            SELECT s3_bucket, s3_key, content_type, is_primary, sort_order
+            FROM public.campaign_photos
+            WHERE campaign_id = $1
+            ORDER BY is_primary DESC, sort_order ASC, photo_id ASC
+            """,
+            campaign_id,
+        )
+
+    photo_list: list[dict[str, Any]] = []
+    for p in photos:
+        bucket = (p["s3_bucket"] or "").strip()
+        key = (p["s3_key"] or "").strip()
+        photo_list.append(
+            {
+                "s3_bucket": bucket,
+                "s3_key": key,
+                "content_type": p["content_type"] or "image/jpeg",
+                "is_primary": bool(p["is_primary"]),
+                "sort_order": int(p["sort_order"] or 0),
+                "image_url": _campaign_photo_public_url(bucket, key) if bucket and key else None,
+            }
+        )
 
     return {
         "campaign_id": campaign["campaign_id"],
@@ -546,6 +815,7 @@ async def get_draft_campaign(campaign_id: int, creator_id: str) -> dict[str, Any
         "description_html": campaign["description_html"] or "",
         "bio": campaign["bio"] or "",
         "vanity_slug": campaign["url"] or "",
+        "photos": photo_list,
         "rewards": [
             {
                 "title": r["title"] or "",

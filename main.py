@@ -2,10 +2,17 @@
 Community Fundings — FastAPI Backend
 Full crowdfunding platform with Stripe + PostgreSQL RDS
 """
-from dotenv import load_dotenv
-load_dotenv()
-
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Always load backend/.env next to this file — not "whatever .env is in the shell cwd"
+_backend_dir = Path(__file__).resolve().parent
+load_dotenv(_backend_dir / ".env")
+# Exported vars in your shell win over .env unless you: unset them, or set DOTENV_OVERRIDE=1
+if os.getenv("DOTENV_OVERRIDE", "").lower() in ("1", "true", "yes"):
+    load_dotenv(_backend_dir / ".env", override=True)
 import sys
 import traceback
 from contextlib import asynccontextmanager
@@ -14,8 +21,8 @@ from fastapi import FastAPI, Header, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from jwt import InvalidTokenError
-
-
+from app.routes.follows import router as follows_router
+from app.routes.saved_campaigns import router as saved_campaigns_router
 
 from jwt_utils import verify_token
 from app.db import (
@@ -36,8 +43,8 @@ from app.routes.comments import router as comments_router
 from app.routes.ledger import router as ledger_router
 from app.routes.reports import router as reports_router
 from app.routes.uploads import router as uploads_router
-from app.routes.campaign_page import router as campaign_page_router
 from app.routes.admin import router as admin_router
+from app.routes.profile_page import router as profile_page_router
 
 
 
@@ -128,6 +135,10 @@ async def get_current_user(authorization: str = Header(None)):
 # ─────────────────────────────────────────────────────────────────────────────
 # Root / Config
 # ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/test-profile-route")
+async def test_profile_route():
+    return {"ok": True}
 
 @app.get("/")
 async def root():

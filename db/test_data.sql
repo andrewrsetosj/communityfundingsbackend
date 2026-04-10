@@ -116,16 +116,18 @@ INSERT INTO collaborators (campaign_id, email, status, time_created) VALUES
 -- ----------------------------
 -- 6) Fake Bank Details for Campaigns
 -- ----------------------------
-INSERT INTO bank_details (campaign_id, routing_number, account_number, account_type) VALUES
-(1, '121000248', '12345678901234567', 'individual'),
-(2, '021000021', '23456789012345678', 'individual'),
-(3, '111000025', '34567890123456789', 'business'),
-(4, '031100173', '45678901234567890', 'individual'),
-(5, '051000017', '56789012345678901', 'individual'),
-(6, '101000187', '67890123456789012', 'business'),
-(7, '071000013', '78901234567890123', 'individual'),
-(8, '081000210', '89012345678901234', 'individual'),
-(9, '091000022', '90123456789012345', 'business'),
-(10, '011000015', '01234567890123456', 'individual');
+-- After migration 002: (campaign_id, fermat_key, account_type) — fermat_key holds Fernet ciphertext in prod.
+-- Legacy seed used plaintext routing/account; replace fermat_key with real tokens if testing encryption.
+INSERT INTO bank_details (campaign_id, fermat_key, account_type) VALUES
+(1, '121000248', 'individual'),
+(2, '021000021', 'individual'),
+(3, '111000025', 'business'),
+(4, '031100173', 'individual'),
+(5, '051000017', 'individual'),
+(6, '101000187', 'business'),
+(7, '071000013', 'individual'),
+(8, '081000210', 'individual'),
+(9, '091000022', 'business'),
+(10, '011000015', 'individual');
 
 COMMIT;
