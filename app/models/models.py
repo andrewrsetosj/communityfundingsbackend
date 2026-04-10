@@ -83,7 +83,6 @@ class User(Base):
 
     id = Column("creator_id", String(50), primary_key=True, default=generate_uuid)
     email = Column(String(255), unique=True, nullable=True, index=True)
-    username = Column(String(30), unique=True, nullable=True, index=True)
     name = Column(String(255), nullable=True)
     last_name = Column(String(255), nullable=True)
     user_type = Column(Integer, default=0, server_default="0")

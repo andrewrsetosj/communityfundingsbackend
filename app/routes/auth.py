@@ -132,7 +132,8 @@ async def change_password(
     user.hashed_password = hash_password(data.new_password)
     await db.flush()
 
-class ClerkSyncRequest(PydanticBaseModel):
+
+class ClerkSyncRequest(BaseModel):
     clerk_id: str = ""
     email: str
     name: str
