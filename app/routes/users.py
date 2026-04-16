@@ -112,7 +112,7 @@ async def _validate_username(db: AsyncSession, username: str, current_user_id: s
 async def get_user_public(user_id: str, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(User).where(
-            or_(User.id == user_id, func.lower(User.username) == user_id.lower())
+            or_(User.id == user_id, False)
         )
     )
     user = result.scalar_one_or_none()

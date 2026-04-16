@@ -137,3 +137,27 @@ async def creator_ledger(user: User = Depends(get_current_user), db: AsyncSessio
         "donation_count": len([d for d in donations if d["status"] == "succeeded"]),
         "campaigns": campaign_summary,
     }
+
+
+@router.get("/campaign/{campaign_id}/donors")
+async def campaign_donors(campaign_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Get all donors for a specific campaign owned by current user."""
+    from sqlalchemy import text
+    result = await db.execute(text("""
+        SELECT d.donation_id, d.donor_name, d.donor_email, d.amount, d.status,
+               d.time_created, d.message, d.is_anonymous
+        FROM donations d
+        JOIN campaigns c ON c.campaign_id = d.campaign_id
+        WHERE d.campaign_id = :cid AND c.creator_id = :uid
+        ORDER BY d.time_created DESC
+    """), {"cid": campaign_id, "uid": user.id})
+    rows = result.mappings().all()
+    return [{
+        "donation_id": r["donation_id"],
+        "donor_name": "Anonymous" if r["is_anonymous"] else r["donor_name"],
+        "donor_email": None if r["is_anonymous"] else r["donor_email"],
+        "amount": float(r["amount"]),
+        "status": r["status"],
+        "location": (r["message"] or "").replace("From ", "") if r["message"] and r["message"].startswith("From ") else None,
+        "created_at": str(r["time_created"]),
+    } for r in rows]

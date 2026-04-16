@@ -106,7 +106,7 @@ async def list_campaigns(
         param_index += 1
 
     if q:
-        where_clauses.append(f"(c.title ILIKE ${param_index} OR c.description_html ILIKE ${param_index})")
+        where_clauses.append(f"(c.title ILIKE ${param_index} OR c.description ILIKE ${param_index})")
         params.append(f"%{q}%")
         param_index += 1
 
@@ -140,7 +140,7 @@ async def list_campaigns(
                 c.campaign_id AS id,
                 c.title,
                 c.url AS slug,
-                c.description_html AS description,
+                c.description AS description,
                 COALESCE(c.funding_goal_cents, 0) / 100.0 AS goal_amount,
                 COALESCE(c.amount_raised_cents, 0) / 100.0 AS raised_amount,
                 c.creator_id,
@@ -150,7 +150,7 @@ async def list_campaigns(
                 c.category,
                 c.location,
                 c.end_date,
-                c.bio,
+                
                 c.duration_days,
                 CASE
                     WHEN COALESCE(c.funding_goal_cents, 0) > 0
@@ -344,7 +344,7 @@ async def my_organizations(user: User = Depends(get_current_user)):
     async with pool.acquire() as conn:
         orgs = await conn.fetch(
             """
-            SELECT c.creator_id, c.name, c.last_name, c.bio
+            SELECT c.creator_id, c.name, c.last_name, 
             FROM organization_members om
             JOIN creators c ON c.creator_id = om.organization_id
             WHERE om.member_id = $1
