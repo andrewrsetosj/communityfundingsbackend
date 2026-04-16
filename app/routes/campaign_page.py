@@ -130,6 +130,15 @@ async def _get_campaign_by_url_or_id(campaign_url: str):
     pool = await get_pool()
 
     async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE campaigns
+            SET status = 'inactive'
+            WHERE status = 'active'
+            AND end_date IS NOT NULL
+            AND end_date <= NOW()
+            """
+        )
         campaign = None
 
         if campaign_url.isdigit():
@@ -421,8 +430,10 @@ async def get_campaign_page(
         is_collaborator, has_pending_invite = await _get_viewer_collaborator_status(conn, cid, viewer_id)
         is_saved = await _get_viewer_saved_status(conn, cid, viewer_id)
 
+        is_public_campaign = campaign.get("status") in {"active", "inactive"}
+
         can_view_campaign = bool(
-            campaign.get("status") == "active"
+            is_public_campaign
             or is_owner
             or is_collaborator
             or has_pending_invite
@@ -430,8 +441,31 @@ async def get_campaign_page(
         can_comment = bool(campaign.get("status") == "active" and can_view_campaign)
 
         if not can_view_campaign:
-            raise HTTPException(status_code=403, detail="You do not have permission to view this campaign")
-
+            return {
+                "campaign": campaign,
+                "creator": creator,
+                "collaborators": [],
+                "faqs": [],
+                "rewards": [],
+                "photos": [],
+                "comments": [],
+                "comments_pagination": {
+                    "page": 1,
+                    "per_page": COMMENTS_PER_PAGE,
+                    "total_parent_comments": 0,
+                    "total_pages": 1,
+                },
+                "viewer_permissions": {
+                    "is_owner": is_owner,
+                    "is_collaborator": is_collaborator,
+                    "has_pending_invite": has_pending_invite,
+                    "can_view": False,
+                    "can_comment": False,
+                },
+                "viewer_engagement": {
+                    "is_saved": is_saved,
+                },
+            }
         faqs = [
             dict(f)
             for f in await conn.fetch(

@@ -76,6 +76,7 @@ class UserPublicResponse(BaseModel):
     last_name: Optional[str] = None
     username: Optional[str] = None
     email: Optional[str] = None
+    user_type: Optional[int] = None
     bio: Optional[str] = None
     avatar_url: Optional[str] = None
     email_verified: bool = False
@@ -120,23 +121,24 @@ class CampaignUpdate(BaseModel):
 
 
 class CampaignResponse(BaseModel):
-    id: int  # campaign_id (bigserial)
+    id: int
     title: str
-    slug: Optional[str] = None  # url
-    description: Optional[str] = None  # description_html
-    goal_amount: float  # funding_goal_cents
-    raised_amount: float = 0  # amount_raised_cents
+    slug: Optional[str] = None
+    description: Optional[str] = None
+    goal_amount: float
+    raised_amount: float = 0
     creator_id: Optional[str] = None
-    creator_name: Optional[str] = None  # computed from creators join
+    creator_name: Optional[str] = None
     status: Optional[str] = None
-    donors_count: int = 0  # backers
+    donors_count: int = 0
     category: Optional[str] = None
     location: Optional[str] = None
     end_date: Optional[datetime] = None
     duration_days: Optional[int] = None
-    funding_percentage: float = 0.0  # computed
-    days_left: Optional[int] = None  # computed
-    created_at: Optional[datetime] = None  # time_created
+    funding_percentage: float = 0.0
+    days_left: Optional[int] = None
+    created_at: Optional[datetime] = None
+
     image_url: Optional[str] = None
     content_type: Optional[str] = None
 

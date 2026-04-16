@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 from jwt import InvalidTokenError
 from app.routes.follows import router as follows_router
 from app.routes.saved_campaigns import router as saved_campaigns_router
+from app.routes.notifications import router as notifications_router
 
 from jwt_utils import verify_token
 from app.db import (
