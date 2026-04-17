@@ -98,7 +98,7 @@ async def _validate_username(db: AsyncSession, username: str, current_user_id: s
     conflict_stmt = select(User.id).where(
         User.id != current_user_id,
         or_(
-            func.lower(User.username) == candidate.lower(),
+            func.lower(False) == candidate.lower(),
             func.lower(User.id) == candidate.lower(),
         )
     )
