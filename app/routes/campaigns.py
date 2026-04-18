@@ -20,6 +20,12 @@ from app.models.schemas import (
     CampaignCreate, CampaignUpdate, CampaignResponse, CampaignListResponse,
 )
 import db as db_mod
+from app.state_mapping import (
+    expand_state,
+    is_usa_filter,
+    all_state_abbr_regex,
+    all_state_ilike_patterns,
+)
 
 router = APIRouter(prefix="/api/campaigns", tags=["campaigns"])
 
@@ -98,19 +104,53 @@ async def list_campaigns(
         param_index += 1
 
     if category:
-        where_clauses.append(f"c.category = ${param_index}")
-        params.append(category)
-        param_index += 1
+        cats = [c.strip() for c in category.split(",") if c.strip()]
+        if cats:
+            placeholders = ",".join(f"${param_index + i}" for i in range(len(cats)))
+            where_clauses.append(f"c.category IN ({placeholders})")
+            params.extend(cats)
+            param_index += len(cats)
 
     if location:
-        where_clauses.append(f"c.location ILIKE ${param_index}")
-        params.append(f"%{location}%")
-        param_index += 1
+        if is_usa_filter(location):
+            # "USA" / "United States" / etc. → match any US state
+            # (abbreviation word-bounded, OR full state name substring, OR literal USA alias).
+            where_clauses.append(
+                f"(c.location ~* ${param_index} "
+                f"OR c.location ILIKE ANY(${param_index + 1}::text[]))"
+            )
+            params.append(all_state_abbr_regex())
+            params.append(all_state_ilike_patterns())
+            param_index += 2
+        else:
+            full_name, abbrev = expand_state(location)
+            if full_name and abbrev:
+                # User typed a US state — match spelled-out name (substring)
+                # or 2-letter abbreviation as a whole word.
+                where_clauses.append(
+                    f"(c.location ILIKE ${param_index} "
+                    f"OR c.location ~* ${param_index + 1})"
+                )
+                params.append(f"%{full_name}%")
+                params.append(rf"\y{abbrev}\y")
+                param_index += 2
+            else:
+                where_clauses.append(f"c.location ILIKE ${param_index}")
+                params.append(f"%{location}%")
+                param_index += 1
 
     if q:
-        where_clauses.append(f"(c.title ILIKE ${param_index} OR c.description_html ILIKE ${param_index})")
-        params.append(f"%{q}%")
-        param_index += 1
+        # Word-boundary match: "cat" matches "cat" but not "category".
+        # re.findall(r"\w+") both tokenizes and strips regex metacharacters,
+        # so the \y...\y pattern sent to Postgres is always safe.
+        words = re.findall(r"\w+", q)
+        for word in words:
+            where_clauses.append(
+                f"(c.title ~* ${param_index} OR "
+                f"regexp_replace(c.description_html, '<[^>]*>', ' ', 'g') ~* ${param_index})"
+            )
+            params.append(rf"\y{word}\y")
+            param_index += 1
 
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
