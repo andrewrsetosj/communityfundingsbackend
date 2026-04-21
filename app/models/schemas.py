@@ -87,6 +87,7 @@ class UserPublicResponse(BaseModel):
     state: Optional[str] = None
     time_zone: Optional[str] = None
     website: Optional[str] = None
+    avatar_url: Optional[str] = None
     created_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}

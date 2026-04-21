@@ -24,6 +24,7 @@ from jwt import InvalidTokenError
 from app.routes.follows import router as follows_router
 from app.routes.saved_campaigns import router as saved_campaigns_router
 from app.routes.notifications import router as notifications_router
+from app.routes.misc_reports import router as misc_reports_router
 
 from jwt_utils import verify_token
 from app.db import (
@@ -46,6 +47,7 @@ from app.routes.uploads import router as uploads_router
 from app.routes.admin import router as admin_router
 from app.routes.profile_page import router as profile_page_router
 from app.routes.organizations import router as organizations_router
+from app.routes.locations import router as locations_router
 
 
 
@@ -113,6 +115,8 @@ app.include_router(follows_router)
 app.include_router(saved_campaigns_router)
 app.include_router(notifications_router)
 app.include_router(organizations_router)
+app.include_router(locations_router)
+app.include_router(misc_reports_router)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Auth Dependency
