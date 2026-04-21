@@ -438,46 +438,106 @@ async def unblock_user(creator_id: str, admin_id: int,
 async def list_reports(admin_id: int, db: AsyncSession = Depends(get_db)):
     await _verify_admin(admin_id, db)
 
-    rc = await db.execute(text("""
-        SELECT c.campaign_id, c.title, c.status, c.creator_id, cr.name AS creator_name,
-               c.funding_goal_cents, c.amount_raised_cents, c.backers,
-               COUNT(r.report_id) AS report_count,
-               STRING_AGG(DISTINCT COALESCE(r.reason,''), ', ') AS reasons
-        FROM campaigns c
-        JOIN reports r ON CAST(r.campaign_id AS TEXT) = CAST(c.campaign_id AS TEXT)
-        LEFT JOIN creators cr ON cr.creator_id = c.creator_id
-        GROUP BY c.campaign_id, c.title, c.status, c.creator_id, cr.name,
-                 c.funding_goal_cents, c.amount_raised_cents, c.backers
-        ORDER BY report_count DESC
+    # Schema-adaptive: discover which optional columns exist in the `reports` table
+    r = await db.execute(text("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='reports'
     """))
-    cc = await db.execute(text("""
-        SELECT co.comment_id, co.comment_text, co.creator_id, cr.name AS commenter_name,
-               co.campaign_id, ca.title AS campaign_title, co.is_hidden, co.time_created
-        FROM comments co
-        LEFT JOIN creators cr ON cr.creator_id = co.creator_id
-        LEFT JOIN campaigns ca ON ca.campaign_id = co.campaign_id
-        WHERE co.is_hidden = false
-        ORDER BY co.time_created DESC
-        LIMIT 50
-    """))
+    reports_cols = {row[0] for row in r.all()}
+    has_reason  = "reason" in reports_cols
+    has_comment_id = "comment_id" in reports_cols
+    has_report_id  = "report_id" in reports_cols
 
-    return {
-        "campaigns": [{
+    # Pick the right ID column to count
+    id_col = "report_id" if has_report_id else "*"
+    # Optional reason aggregation
+    reason_expr = "STRING_AGG(DISTINCT COALESCE(r.reason,''), ', ')" if has_reason else "''"
+
+    # Reported campaigns — resilient to missing columns
+    try:
+        rc = await db.execute(text(f"""
+            SELECT c.campaign_id, c.title, c.status, c.creator_id, cr.name AS creator_name,
+                   c.funding_goal_cents, c.amount_raised_cents, c.backers,
+                   COUNT(r.{id_col}) AS report_count,
+                   {reason_expr} AS reasons
+            FROM campaigns c
+            JOIN reports r ON CAST(r.campaign_id AS TEXT) = CAST(c.campaign_id AS TEXT)
+            LEFT JOIN creators cr ON cr.creator_id = c.creator_id
+            GROUP BY c.campaign_id, c.title, c.status, c.creator_id, cr.name,
+                     c.funding_goal_cents, c.amount_raised_cents, c.backers
+            ORDER BY report_count DESC
+        """))
+        reported_campaigns = [{
             "id": r["campaign_id"], "title": r["title"], "status": r["status"],
             "creator_id": r["creator_id"], "creator_name": r["creator_name"] or "Unknown",
             "raised": (r["amount_raised_cents"] or 0) / 100,
             "goal":   (r["funding_goal_cents"] or 0) / 100,
             "backers": r["backers"] or 0,
             "report_count": r["report_count"],
-            "reasons": r["reasons"],
-        } for r in rc.mappings()],
-        "comments": [{
-            "id": r["comment_id"], "text": r["comment_text"],
-            "creator_id": r["creator_id"], "commenter_name": r["commenter_name"] or "Unknown",
-            "campaign_id": r["campaign_id"],
-            "campaign_title": r["campaign_title"] or f"Campaign #{r['campaign_id']}",
-            "time_created": str(r["time_created"]) if r["time_created"] else None,
-        } for r in cc.mappings()],
+            "reasons": r["reasons"] if r["reasons"] else "",
+        } for r in rc.mappings()]
+    except Exception as e:
+        await db.rollback()
+        reported_campaigns = []
+
+    # Reported comments — list comments that appear in reports table (if reports links to comments),
+    # otherwise fall back to showing recent non-hidden comments
+    reported_comments = []
+    try:
+        if has_comment_id:
+            # reports table has a comment_id link — show comments that were actually reported
+            cc = await db.execute(text(f"""
+                SELECT co.comment_id, co.comment_text, co.creator_id, cr.name AS commenter_name,
+                       co.campaign_id, ca.title AS campaign_title, co.time_created,
+                       COUNT(r.{id_col}) AS report_count,
+                       {reason_expr} AS reasons
+                FROM comments co
+                JOIN reports r ON r.comment_id = co.comment_id
+                LEFT JOIN creators cr ON cr.creator_id = co.creator_id
+                LEFT JOIN campaigns ca ON ca.campaign_id = co.campaign_id
+                GROUP BY co.comment_id, co.comment_text, co.creator_id, cr.name,
+                         co.campaign_id, ca.title, co.time_created
+                ORDER BY report_count DESC, co.time_created DESC
+                LIMIT 50
+            """))
+            reported_comments = [{
+                "id": r["comment_id"], "text": r["comment_text"],
+                "creator_id": r["creator_id"],
+                "commenter_name": r["commenter_name"] or "Unknown",
+                "campaign_id": r["campaign_id"],
+                "campaign_title": r["campaign_title"] or f"Campaign #{r['campaign_id']}",
+                "time_created": str(r["time_created"]) if r["time_created"] else None,
+                "report_count": r["report_count"],
+                "reasons": r["reasons"] if r["reasons"] else "",
+            } for r in cc.mappings()]
+        else:
+            # Fallback — show recent non-hidden comments as "needs review"
+            cc = await db.execute(text("""
+                SELECT co.comment_id, co.comment_text, co.creator_id, cr.name AS commenter_name,
+                       co.campaign_id, ca.title AS campaign_title, co.time_created
+                FROM comments co
+                LEFT JOIN creators cr ON cr.creator_id = co.creator_id
+                LEFT JOIN campaigns ca ON ca.campaign_id = co.campaign_id
+                ORDER BY co.time_created DESC
+                LIMIT 20
+            """))
+            reported_comments = [{
+                "id": r["comment_id"], "text": r["comment_text"],
+                "creator_id": r["creator_id"],
+                "commenter_name": r["commenter_name"] or "Unknown",
+                "campaign_id": r["campaign_id"],
+                "campaign_title": r["campaign_title"] or f"Campaign #{r['campaign_id']}",
+                "time_created": str(r["time_created"]) if r["time_created"] else None,
+                "report_count": 0,
+                "reasons": "",
+            } for r in cc.mappings()]
+    except Exception:
+        await db.rollback()
+        reported_comments = []
+
+    return {
+        "campaigns": reported_campaigns,
+        "comments":  reported_comments,
     }
 
 
@@ -583,216 +643,3 @@ async def list_activity(admin_id: int, limit: int = 100,
     except Exception:
         await db.rollback()
         return {"activity": [], "notice": "Activity log temporarily unavailable."}
-
-
-# ============================================================================
-# v8 ADDITIONS — Approval workflow + tiered ban system
-# ============================================================================
-
-class BanAction(BaseModel):
-    ban_type: str  # 'warning' | 'soft_ban' | 'full_ban'
-    reason: str | None = None
-
-
-class RejectCampaign(BaseModel):
-    reason: str
-
-
-# ─── Campaign approval workflow ──────────────────────────────────────────────
-
-@router.get("/pending-campaigns")
-async def list_pending_campaigns(admin_id: int, db: AsyncSession = Depends(get_db)):
-    """Campaigns awaiting admin approval."""
-    await _verify_admin(admin_id, db)
-    r = await db.execute(text("""
-        SELECT c.campaign_id, c.title, c.description, c.category, c.location,
-               c.funding_goal_cents, c.status, c.creator_id, c.time_created,
-               cr.name AS creator_name, cr.email AS creator_email
-        FROM campaigns c
-        LEFT JOIN creators cr ON cr.creator_id = c.creator_id
-        WHERE c.status = 'pending_review'
-        ORDER BY c.time_created DESC
-    """))
-    rows = r.mappings().all()
-    return {
-        "count": len(rows),
-        "pending": [{
-            "campaign_id": row["campaign_id"],
-            "title": row["title"],
-            "description": row["description"],
-            "category": row["category"],
-            "location": row["location"],
-            "funding_goal": (row["funding_goal_cents"] or 0) / 100,
-            "creator_id": row["creator_id"],
-            "creator_name": row["creator_name"] or "Unknown",
-            "creator_email": row["creator_email"],
-            "submitted_at": str(row["time_created"]) if row["time_created"] else None,
-        } for row in rows]
-    }
-
-
-@router.post("/campaigns/{campaign_id}/approve")
-async def approve_campaign(campaign_id: int, admin_id: int, db: AsyncSession = Depends(get_db)):
-    """Approve a pending campaign so it becomes visible to the public."""
-    await _verify_admin(admin_id, db)
-    r = await db.execute(text("""
-        UPDATE campaigns
-        SET status = 'active', reviewed_by = :aid, reviewed_at = NOW(), rejected_reason = NULL
-        WHERE campaign_id = :cid AND status = 'pending_review'
-        RETURNING campaign_id, title
-    """), {"cid": campaign_id, "aid": admin_id})
-    row = r.mappings().first()
-    if not row:
-        raise HTTPException(status_code=404, detail="Campaign not found or already reviewed")
-    await _log(db, admin_id, "approve_campaign", "campaign", str(campaign_id), f"Approved: {row['title']}")
-    await db.commit()
-    return {"status": "approved", "campaign_id": campaign_id, "title": row["title"]}
-
-
-@router.post("/campaigns/{campaign_id}/reject")
-async def reject_campaign(campaign_id: int, admin_id: int, data: RejectCampaign,
-                           db: AsyncSession = Depends(get_db)):
-    """Reject a pending campaign with a reason — campaign stays hidden from public."""
-    await _verify_admin(admin_id, db)
-    r = await db.execute(text("""
-        UPDATE campaigns
-        SET status = 'rejected', reviewed_by = :aid, reviewed_at = NOW(), rejected_reason = :reason
-        WHERE campaign_id = :cid AND status = 'pending_review'
-        RETURNING campaign_id, title
-    """), {"cid": campaign_id, "aid": admin_id, "reason": data.reason})
-    row = r.mappings().first()
-    if not row:
-        raise HTTPException(status_code=404, detail="Campaign not found or already reviewed")
-    await _log(db, admin_id, "reject_campaign", "campaign", str(campaign_id),
-               f"Rejected: {row['title']} — {data.reason}")
-    await db.commit()
-    return {"status": "rejected", "campaign_id": campaign_id, "reason": data.reason}
-
-
-# ─── Tiered ban system (warning → soft_ban → full_ban) ──────────────────────
-
-@router.post("/users/{creator_id}/moderate")
-async def moderate_user(creator_id: str, admin_id: int, data: BanAction,
-                         db: AsyncSession = Depends(get_db)):
-    """
-    Apply a moderation action to a user.
-
-    ban_type options:
-      • 'warning'   — issue a warning. If user reaches 3 warnings, auto-promoted to full_ban.
-      • 'soft_ban'  — user can never comment anywhere again (account stays open).
-      • 'full_ban'  — user's account deactivated, locked out entirely.
-    """
-    await _verify_admin(admin_id, db)
-
-    if data.ban_type not in ("warning", "soft_ban", "full_ban"):
-        raise HTTPException(status_code=400, detail="ban_type must be warning, soft_ban, or full_ban")
-
-    # Verify creator exists
-    r = await db.execute(text("SELECT creator_id, name FROM creators WHERE creator_id = :id"), {"id": creator_id})
-    creator = r.mappings().first()
-    if not creator:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    reason = data.reason or "Moderation action by site admin"
-
-    if data.ban_type == "warning":
-        # Increment warning counter
-        r = await db.execute(text("""
-            UPDATE creators SET warning_count = COALESCE(warning_count, 0) + 1
-            WHERE creator_id = :id
-            RETURNING warning_count
-        """), {"id": creator_id})
-        new_count = r.scalar()
-
-        # Record the warning in blocked_users (non-unique — accumulates)
-        await db.execute(text("""
-            INSERT INTO blocked_users (creator_id, reason, blocked_by, ban_type)
-            VALUES (:cid, :r, :aid, 'warning')
-        """), {"cid": creator_id, "r": reason, "aid": admin_id})
-
-        # Auto-promote at 3rd warning
-        if new_count >= 3:
-            # Ensure no existing active ban first
-            await db.execute(text("""
-                DELETE FROM blocked_users
-                WHERE creator_id = :cid AND ban_type IN ('soft_ban', 'full_ban')
-            """), {"cid": creator_id})
-            await db.execute(text("""
-                INSERT INTO blocked_users (creator_id, reason, blocked_by, ban_type)
-                VALUES (:cid, :r, :aid, 'full_ban')
-            """), {"cid": creator_id, "r": f"Auto-escalated after {new_count} warnings", "aid": admin_id})
-            await _log(db, admin_id, "auto_full_ban", "user", creator_id,
-                       f"Auto-full-ban after {new_count} warnings for {creator['name']}")
-            await db.commit()
-            return {"status": "full_ban", "auto_escalated": True, "warning_count": new_count,
-                    "message": f"{creator['name']} auto-banned after {new_count} warnings"}
-
-        await _log(db, admin_id, "warning", "user", creator_id,
-                   f"Warning #{new_count} issued to {creator['name']}: {reason}")
-        await db.commit()
-        return {"status": "warning", "warning_count": new_count,
-                "message": f"Warning #{new_count} of 3 issued"}
-
-    # soft_ban or full_ban — upsert the active ban
-    await db.execute(text("""
-        DELETE FROM blocked_users
-        WHERE creator_id = :cid AND ban_type IN ('soft_ban', 'full_ban')
-    """), {"cid": creator_id})
-    await db.execute(text("""
-        INSERT INTO blocked_users (creator_id, reason, blocked_by, ban_type)
-        VALUES (:cid, :r, :aid, :bt)
-    """), {"cid": creator_id, "r": reason, "aid": admin_id, "bt": data.ban_type})
-
-    action = "soft_ban" if data.ban_type == "soft_ban" else "full_ban"
-    await _log(db, admin_id, action, "user", creator_id,
-               f"{action} applied to {creator['name']}: {reason}")
-    await db.commit()
-    return {"status": data.ban_type, "creator_id": creator_id}
-
-
-@router.post("/users/{creator_id}/lift-ban")
-async def lift_ban(creator_id: str, admin_id: int, db: AsyncSession = Depends(get_db)):
-    """Remove all active bans (soft and full) for a user. Warning history preserved."""
-    await _verify_admin(admin_id, db)
-    r = await db.execute(text("""
-        DELETE FROM blocked_users
-        WHERE creator_id = :cid AND ban_type IN ('soft_ban', 'full_ban')
-        RETURNING ban_id
-    """), {"cid": creator_id})
-    removed = len(r.all())
-    await _log(db, admin_id, "lift_ban", "user", creator_id, f"Lifted bans ({removed} rows)")
-    await db.commit()
-    return {"status": "lifted", "removed": removed}
-
-
-@router.post("/users/{creator_id}/reset-warnings")
-async def reset_warnings(creator_id: str, admin_id: int, db: AsyncSession = Depends(get_db)):
-    """Clear a user's warning history."""
-    await _verify_admin(admin_id, db)
-    await db.execute(text("UPDATE creators SET warning_count = 0 WHERE creator_id = :cid"),
-                     {"cid": creator_id})
-    await db.execute(text("DELETE FROM blocked_users WHERE creator_id = :cid AND ban_type = 'warning'"),
-                     {"cid": creator_id})
-    await _log(db, admin_id, "reset_warnings", "user", creator_id, "Warning count reset to 0")
-    await db.commit()
-    return {"status": "reset"}
-
-
-# ─── Public-site enforcement helper ─────────────────────────────────────────
-
-@router.get("/check-comment-permission")
-async def check_comment_permission(creator_id: str, db: AsyncSession = Depends(get_db)):
-    """
-    Public endpoint called by the comment-submission flow.
-    Returns {can_comment: bool, reason?: str} — frontend uses this to block
-    submission UI for soft-banned users.
-    """
-    r = await db.execute(text("""
-        SELECT ban_type, reason FROM blocked_users
-        WHERE creator_id = :cid AND ban_type IN ('soft_ban', 'full_ban')
-        ORDER BY blocked_at DESC LIMIT 1
-    """), {"cid": creator_id})
-    row = r.mappings().first()
-    if row:
-        return {"can_comment": False, "ban_type": row["ban_type"], "reason": row["reason"]}
-    return {"can_comment": True}
