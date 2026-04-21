@@ -109,6 +109,7 @@ async def upsert_creator(
     last_name: Optional[str] = None,
     email: Optional[str] = None,
     time_creation: Optional[datetime.datetime] = None,
+    user_type: int = 1,
 ) -> Any:
     """
     Insert or update a creators row using creator_id as the unique key.
@@ -124,8 +125,8 @@ async def upsert_creator(
             if time_creation is None:
                 row = await conn.fetchrow(
                     """
-                    INSERT INTO creators (creator_id, name, last_name, email, time_creation)
-                    VALUES ($1, $2, $3, $4, NOW())
+                    INSERT INTO creators (creator_id, user_type, name, last_name, email, time_creation)
+                    VALUES ($1, $2, $3, $4, $5, NOW())
                     ON CONFLICT (creator_id) DO UPDATE SET
                       name = COALESCE(EXCLUDED.name, creators.name),
                       last_name  = COALESCE(EXCLUDED.last_name, creators.last_name),
@@ -133,6 +134,7 @@ async def upsert_creator(
                     RETURNING *;
                     """,
                     creator_id,
+                    user_type,
                     name,
                     last_name,
                     email,
@@ -140,8 +142,8 @@ async def upsert_creator(
             else:
                 row = await conn.fetchrow(
                     """
-                    INSERT INTO creators (creator_id, name, last_name, email, time_creation)
-                    VALUES ($1, $2, $3, $4, $5)
+                    INSERT INTO creators (creator_id, user_type, name, last_name, email, time_creation)
+                    VALUES ($1, $2, $3, $4, $5, $6)
                     ON CONFLICT (creator_id) DO UPDATE SET
                       name = COALESCE(EXCLUDED.name, creators.name),
                       last_name  = COALESCE(EXCLUDED.last_name, creators.last_name),
@@ -150,6 +152,7 @@ async def upsert_creator(
                     RETURNING *;
                     """,
                     creator_id,
+                    user_type,
                     name,
                     last_name,
                     email,
