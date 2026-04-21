@@ -287,20 +287,26 @@ async def get_featured(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/check-slug")
-async def check_slug(slug: str, db: AsyncSession = Depends(get_db)):
+async def check_slug(slug: str, campaign_id: int | None = None, db: AsyncSession = Depends(get_db)):
     """
     Check if a vanity slug is available.
+    Pass campaign_id to exclude the current campaign (so a draft can keep its own slug).
     Returns {"available": bool}.
     """
     candidate = (slug or "").strip()
     if not candidate:
         raise HTTPException(status_code=400, detail="Slug is required")
 
-    # DB schema uses campaigns.campaign_id + campaigns.url, not ORM's id/slug.
-    result = await db.execute(
-        text("SELECT campaign_id FROM public.campaigns WHERE url = :slug LIMIT 1"),
-        {"slug": candidate},
-    )
+    if campaign_id is not None:
+        result = await db.execute(
+            text("SELECT campaign_id FROM public.campaigns WHERE url = :slug AND campaign_id != :cid LIMIT 1"),
+            {"slug": candidate, "cid": campaign_id},
+        )
+    else:
+        result = await db.execute(
+            text("SELECT campaign_id FROM public.campaigns WHERE url = :slug LIMIT 1"),
+            {"slug": candidate},
+        )
     return {"available": result.first() is None}
 
 
@@ -401,6 +407,7 @@ async def my_organizations(user: User = Depends(get_current_user)):
             FROM organization_members om
             JOIN creators c ON c.creator_id = om.organization_id
             WHERE om.member_id = $1
+              AND c.user_type = 0
             """,
             user.id,
         )
