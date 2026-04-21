@@ -17,6 +17,7 @@ class RegisterRequest(BaseModel):
     email: EmailStr
     name: str = Field(..., min_length=1, max_length=255)
     password: str = Field(..., min_length=8, max_length=128)
+    owner_id: Optional[str] = None
 
 
 class LoginRequest(BaseModel):
@@ -80,6 +81,7 @@ class UserPublicResponse(BaseModel):
     email: Optional[str] = None
     user_type: Optional[int] = None
     bio: Optional[str] = None
+    avatar_url: Optional[str] = None
     phone_number: Optional[str] = None
     address: Optional[str] = None
     state: Optional[str] = None
@@ -96,6 +98,7 @@ class UserProfileUpdate(BaseModel):
     last_name: Optional[str] = None
     username: Optional[str] = Field(None, min_length=3, max_length=30)
     bio: Optional[str] = None
+    avatar_url: Optional[str] = None
     phone_number: Optional[str] = None
     address: Optional[str] = None
     state: Optional[str] = None

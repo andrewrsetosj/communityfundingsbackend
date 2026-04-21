@@ -45,6 +45,7 @@ from app.routes.reports import router as reports_router
 from app.routes.uploads import router as uploads_router
 from app.routes.admin import router as admin_router
 from app.routes.profile_page import router as profile_page_router
+from app.routes.organizations import router as organizations_router
 
 
 
@@ -111,6 +112,7 @@ app.include_router(profile_page_router)
 app.include_router(follows_router)
 app.include_router(saved_campaigns_router)
 app.include_router(notifications_router)
+app.include_router(organizations_router)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Auth Dependency

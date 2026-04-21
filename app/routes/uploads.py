@@ -117,10 +117,14 @@ async def _assert_campaign_owned(campaign_id: int, user_id: str) -> None:
               ON coll.campaign_id = c.campaign_id
              AND LOWER(coll.email) = LOWER($3)
              AND LOWER(COALESCE(coll.status, '')) = 'accepted'
+            LEFT JOIN public.organization_members om
+              ON om.organization_id = c.creator_id
+             AND om.member_id = $2
             WHERE c.campaign_id = $1
               AND (
                 c.creator_id = $2
                 OR coll.collaborator_id IS NOT NULL
+                OR om.member_id IS NOT NULL
               )
             LIMIT 1
             """,
@@ -223,3 +227,39 @@ async def get_presigned_upload_url(
         "bucket": S3_BUCKET,
         "region": AWS_REGION,
     }
+
+
+@router.post("/image")
+async def upload_profile_image(
+    file: UploadFile = File(...),
+    _user: User = Depends(get_current_user),
+):
+    """Upload a profile photo or business logo to S3. Requires authentication."""
+    content_type = (file.content_type or "").strip() or "application/octet-stream"
+    if content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(status_code=400, detail=f"File type not allowed: {content_type}")
+
+    raw = await file.read()
+    if len(raw) > MAX_IMAGE_BYTES:
+        mb = MAX_IMAGE_BYTES // (1024 * 1024)
+        raise HTTPException(status_code=400, detail=f"File too large (max {mb}MB)")
+
+    filename = file.filename or "upload.jpg"
+    ext = _extension_for_upload(content_type, filename)
+    key = f"profiles/{uuid.uuid4().hex}.{ext}"
+
+    try:
+        s3 = get_s3_client()
+        s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=key,
+            Body=raw,
+            ContentType=content_type,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"S3 upload failed: {str(e)}")
+
+    public_url = f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{key}"
+    return {"url": public_url, "key": key, "bucket": S3_BUCKET}
