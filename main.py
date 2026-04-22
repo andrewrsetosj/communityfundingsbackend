@@ -85,9 +85,22 @@ app = FastAPI(
 # CORS
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _cors_allow_origins() -> list[str]:
+    """Local dev defaults + FRONTEND_URL + optional comma-separated CORS_ORIGINS."""
+    origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    for raw in (
+        os.getenv("FRONTEND_URL", ""),
+        *(os.getenv("CORS_ORIGINS", "").split(",")),
+    ):
+        o = raw.strip().rstrip("/")
+        if o and o not in origins:
+            origins.append(o)
+    return origins
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=_cors_allow_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
