@@ -6,7 +6,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.auth import get_current_user
+from app.auth import get_current_user, get_optional_user
 from app.db import get_pool
 from app.models.models import User
 
@@ -401,7 +401,7 @@ async def get_campaign_page(
     campaign_url: str,
     page: int = Query(1, ge=1),
     sort_by: Literal["newest", "oldest", "most_liked"] = Query("newest"),
-    current_user: User | None = Depends(get_current_user),
+    current_user: User | None = Depends(get_optional_user),
 ):
     campaign = await _get_campaign_by_url_or_id(campaign_url)
     if not campaign:
@@ -699,7 +699,7 @@ async def get_campaign_page(
 async def get_comment_replies(
     campaign_url: str,
     comment_id: int,
-    current_user: User | None = Depends(get_current_user),
+    current_user: User | None = Depends(get_optional_user),
 ):
     campaign = await _get_campaign_by_url_or_id(campaign_url)
     if not campaign:
