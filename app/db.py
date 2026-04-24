@@ -132,12 +132,33 @@ async def init_db() -> None:
     print("✅ asyncpg creators table ensured")
 
 
+async def _creators_first_name_column(conn: asyncpg.Connection) -> str:
+    """RDS schemas vary: some use `name`, others `first_name` (see backend/db.py)."""
+    rows = await conn.fetch(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'creators'
+        """
+    )
+    colset = {r["column_name"] for r in rows}
+    if "name" in colset:
+        return "name"
+    if "first_name" in colset:
+        return "first_name"
+    raise RuntimeError(
+        "creators table has neither `name` nor `first_name`; cannot upsert. "
+        f"Found columns: {sorted(colset)}"
+    )
+
+
 async def upsert_creator(
     creator_id: str,
     name: Optional[str] = None,
     last_name: Optional[str] = None,
     email: Optional[str] = None,
     time_creation: Optional[datetime.datetime] = None,
+    user_type: Optional[int] = None,
 ) -> Any:
     """
     Insert or update a creators row using creator_id as the unique key.
@@ -147,43 +168,93 @@ async def upsert_creator(
     if not get_database_url():
         raise RuntimeError("DATABASE_URL is not configured; cannot upsert creator")
 
+    ut = 0 if user_type is None else int(user_type)
+
     pool = await get_pool()
     async with pool.acquire() as conn:
         try:
+            first_col = await _creators_first_name_column(conn)
+            has_user_type = await conn.fetchval(
+                """
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'creators'
+                  AND column_name = 'user_type'
+                """
+            )
             if time_creation is None:
-                row = await conn.fetchrow(
-                    """
-                    INSERT INTO creators (creator_id, name, last_name, email, time_creation)
-                    VALUES ($1, $2, $3, $4, NOW())
-                    ON CONFLICT (creator_id) DO UPDATE SET
-                      name = COALESCE(EXCLUDED.name, creators.name),
-                      last_name  = COALESCE(EXCLUDED.last_name, creators.last_name),
-                      email      = COALESCE(EXCLUDED.email, creators.email)
-                    RETURNING *;
-                    """,
-                    creator_id,
-                    name,
-                    last_name,
-                    email,
-                )
+                if has_user_type:
+                    row = await conn.fetchrow(
+                        f"""
+                        INSERT INTO creators (creator_id, {first_col}, last_name, email, user_type, time_creation)
+                        VALUES ($1, $2, $3, $4, $5, NOW())
+                        ON CONFLICT (creator_id) DO UPDATE SET
+                          {first_col} = COALESCE(EXCLUDED.{first_col}, creators.{first_col}),
+                          last_name  = COALESCE(EXCLUDED.last_name, creators.last_name),
+                          email      = COALESCE(EXCLUDED.email, creators.email),
+                          user_type  = COALESCE(EXCLUDED.user_type, creators.user_type)
+                        RETURNING *;
+                        """,
+                        creator_id,
+                        name,
+                        last_name,
+                        email,
+                        ut,
+                    )
+                else:
+                    row = await conn.fetchrow(
+                        f"""
+                        INSERT INTO creators (creator_id, {first_col}, last_name, email, time_creation)
+                        VALUES ($1, $2, $3, $4, NOW())
+                        ON CONFLICT (creator_id) DO UPDATE SET
+                          {first_col} = COALESCE(EXCLUDED.{first_col}, creators.{first_col}),
+                          last_name  = COALESCE(EXCLUDED.last_name, creators.last_name),
+                          email      = COALESCE(EXCLUDED.email, creators.email)
+                        RETURNING *;
+                        """,
+                        creator_id,
+                        name,
+                        last_name,
+                        email,
+                    )
             else:
-                row = await conn.fetchrow(
-                    """
-                    INSERT INTO creators (creator_id, name, last_name, email, time_creation)
-                    VALUES ($1, $2, $3, $4, $5)
-                    ON CONFLICT (creator_id) DO UPDATE SET
-                      name = COALESCE(EXCLUDED.name, creators.name),
-                      last_name  = COALESCE(EXCLUDED.last_name, creators.last_name),
-                      email      = COALESCE(EXCLUDED.email, creators.email),
-                      time_creation = COALESCE(EXCLUDED.time_creation, creators.time_creation)
-                    RETURNING *;
-                    """,
-                    creator_id,
-                    name,
-                    last_name,
-                    email,
-                    time_creation,
-                )
+                if has_user_type:
+                    row = await conn.fetchrow(
+                        f"""
+                        INSERT INTO creators (creator_id, {first_col}, last_name, email, user_type, time_creation)
+                        VALUES ($1, $2, $3, $4, $5, $6)
+                        ON CONFLICT (creator_id) DO UPDATE SET
+                          {first_col} = COALESCE(EXCLUDED.{first_col}, creators.{first_col}),
+                          last_name  = COALESCE(EXCLUDED.last_name, creators.last_name),
+                          email      = COALESCE(EXCLUDED.email, creators.email),
+                          user_type  = COALESCE(EXCLUDED.user_type, creators.user_type),
+                          time_creation = COALESCE(EXCLUDED.time_creation, creators.time_creation)
+                        RETURNING *;
+                        """,
+                        creator_id,
+                        name,
+                        last_name,
+                        email,
+                        ut,
+                        time_creation,
+                    )
+                else:
+                    row = await conn.fetchrow(
+                        f"""
+                        INSERT INTO creators (creator_id, {first_col}, last_name, email, time_creation)
+                        VALUES ($1, $2, $3, $4, $5)
+                        ON CONFLICT (creator_id) DO UPDATE SET
+                          {first_col} = COALESCE(EXCLUDED.{first_col}, creators.{first_col}),
+                          last_name  = COALESCE(EXCLUDED.last_name, creators.last_name),
+                          email      = COALESCE(EXCLUDED.email, creators.email),
+                          time_creation = COALESCE(EXCLUDED.time_creation, creators.time_creation)
+                        RETURNING *;
+                        """,
+                        creator_id,
+                        name,
+                        last_name,
+                        email,
+                        time_creation,
+                    )
 
             if not row:
                 # Fallback read (should rarely be necessary)
