@@ -2,14 +2,20 @@
 User routes — profiles, payment details, billing addresses
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_
-from typing import List
+from typing import List, Optional
 import re
 
 from app.database import get_db
 from app.auth import get_current_user
+from app.state_mapping import (
+    expand_state,
+    is_usa_filter,
+    all_state_abbr_regex,
+    all_state_ilike_patterns,
+)
 import db as db_mod
 from app.models.models import User, PaymentDetail, BillingAddress, AccountType
 from app.models.schemas import (
@@ -79,6 +85,7 @@ def _public_user_response(user: User) -> UserPublicResponse:
         state=user.state,
         time_zone=user.time_zone,
         website=user.website,
+        avatar_url=user.avatar_url,
         created_at=user.created_at,
     )
 
@@ -106,6 +113,69 @@ async def _validate_username(db: AsyncSession, username: str, current_user_id: s
     if conflict:
         raise HTTPException(status_code=409, detail="That username is already taken")
     return candidate
+
+
+@router.get("", response_model=dict)
+async def search_users(
+    q: Optional[str] = None,
+    state: Optional[str] = None,
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=12, le=50),
+    db: AsyncSession = Depends(get_db),
+):
+    """Search users by name, optionally filtered by state."""
+    query = select(User)
+
+    if q:
+        search = f"%{q}%"
+        query = query.where(
+            or_(
+                User.name.ilike(search),
+                User.last_name.ilike(search),
+            )
+        )
+
+    if state:
+        if is_usa_filter(state):
+            # Match any US state: abbreviation word-bounded, full name substring,
+            # or a literal USA alias (e.g., a user who entered "USA" as their state).
+            or_conds = [
+                User.state.op("~*")(all_state_abbr_regex()),
+            ]
+            for pattern in all_state_ilike_patterns():
+                or_conds.append(User.state.ilike(pattern))
+            query = query.where(or_(*or_conds))
+        else:
+            full_name, abbrev = expand_state(state)
+            if full_name and abbrev:
+                query = query.where(
+                    or_(
+                        User.state.ilike(f"%{full_name}%"),
+                        User.state.op("~*")(rf"\y{abbrev}\y"),
+                    )
+                )
+            else:
+                query = query.where(User.state.ilike(f"%{state}%"))
+
+    count_q = select(func.count()).select_from(query.subquery())
+    total = (await db.execute(count_q)).scalar() or 0
+
+    query = query.order_by(User.name.asc())
+    offset = (page - 1) * per_page
+    query = query.offset(offset).limit(per_page)
+
+    result = await db.execute(query)
+    users = result.scalars().all()
+
+    total_pages = max(1, -(-total // per_page))
+
+    return {
+        "users": [_public_user_response(u).model_dump() for u in users],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+    }
 
 
 @router.get("/{user_id}", response_model=UserPublicResponse)

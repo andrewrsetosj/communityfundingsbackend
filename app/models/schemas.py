@@ -78,6 +78,11 @@ class UserPublicResponse(BaseModel):
     email: Optional[str] = None
     user_type: Optional[int] = None
     bio: Optional[str] = None
+    phone_number: Optional[str] = None
+    address: Optional[str] = None
+    state: Optional[str] = None
+    time_zone: Optional[str] = None
+    website: Optional[str] = None
     avatar_url: Optional[str] = None
     email_verified: bool = False
     stripe_connect_onboarded: bool = False

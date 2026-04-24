@@ -21,10 +21,21 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-# Read DB URL from environment (expected to be postgresql+asyncpg://... or postgresql://...)
-DATABASE_URL: Optional[str] = os.getenv("DATABASE_URL") or None
-
 _pool: Optional[asyncpg.pool.Pool] = None
+
+
+def get_database_url() -> Optional[str]:
+    """
+    Read DATABASE_URL at call time (Railway / Docker set env after image build).
+    Strips whitespace and wrapping quotes — common misconfiguration on hosts.
+    """
+    raw = os.getenv("DATABASE_URL")
+    if raw is None:
+        return None
+    s = raw.strip().strip('"').strip("'")
+    if not s:
+        return None
+    return _normalize_for_asyncpg(s)
 
 
 def _normalize_for_asyncpg(dsn: Optional[str]) -> Optional[str]:
@@ -40,6 +51,22 @@ def _normalize_for_asyncpg(dsn: Optional[str]) -> Optional[str]:
     return dsn
 
 
+def _validate_asyncpg_dsn(dsn: str) -> None:
+    if "://" not in dsn:
+        raise RuntimeError(
+            "DATABASE_URL must be a full URL including scheme (e.g. postgresql://user:pass@host:5432/dbname). "
+            "Host-only values are not accepted."
+        )
+    scheme = dsn.split("://", 1)[0].lower()
+    if scheme not in ("postgresql", "postgres"):
+        raise RuntimeError(
+            "DATABASE_URL must start with postgresql:// or postgres://. "
+            f"After loading from the environment, the scheme was {scheme!r}. "
+            "On Railway, paste the full RDS URL in Variables (no ${{}} unless the referenced variable exists); "
+            "remove stray quotes and line breaks."
+        )
+
+
 async def get_pool() -> asyncpg.pool.Pool:
     """
     Lazily create and return an asyncpg pool.
@@ -47,9 +74,10 @@ async def get_pool() -> asyncpg.pool.Pool:
     """
     global _pool
     if _pool is None:
-        if not DATABASE_URL:
+        dsn = get_database_url()
+        if not dsn:
             raise RuntimeError("DATABASE_URL is not configured in environment")
-        dsn = _normalize_for_asyncpg(DATABASE_URL)
+        _validate_asyncpg_dsn(dsn)
         # Mask DSN in logs so password isn't exposed
         try:
             masked = re.sub(r":\/\/(.*@)", "://***@", dsn)
@@ -65,10 +93,11 @@ async def init_db() -> None:
     Create minimal schema required by the app. Safe to call at startup.
     Only creates the `creators` table (IF NOT EXISTS) to avoid touching other tables.
     """
-    if not DATABASE_URL:
+    dsn = get_database_url()
+    if not dsn:
         # nothing to do in environments without DB configured
         return
-    if DATABASE_URL.startswith("sqlite"):
+    if dsn.startswith("sqlite"):
         print("✅ Using SQLite — skipping asyncpg pool")
         return
 
@@ -95,7 +124,7 @@ async def upsert_creator(
 
     Returns the returned row from the DB (asyncpg.Record) or None on failure.
     """
-    if not DATABASE_URL:
+    if not get_database_url():
         raise RuntimeError("DATABASE_URL is not configured; cannot upsert creator")
 
     pool = await get_pool()
@@ -169,7 +198,7 @@ async def close_pool() -> None:
 
 # what this module exports
 __all__ = [
-    "DATABASE_URL",
+    "get_database_url",
     "get_pool",
     "init_db",
     "upsert_creator",
