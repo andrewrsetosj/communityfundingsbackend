@@ -643,3 +643,207 @@ async def list_activity(admin_id: int, limit: int = 100,
     except Exception:
         await db.rollback()
         return {"activity": [], "notice": "Activity log temporarily unavailable."}
+
+
+# ============================================================================
+# v8 ADDITIONS — Approval workflow + tiered ban system
+# ============================================================================
+
+class BanAction(BaseModel):
+    ban_type: str  # 'warning' | 'soft_ban' | 'full_ban'
+    reason: str | None = None
+
+
+class RejectCampaign(BaseModel):
+    reason: str
+
+
+# ─── Campaign approval workflow ──────────────────────────────────────────────
+
+@router.get("/pending-campaigns")
+async def list_pending_campaigns(admin_id: int, db: AsyncSession = Depends(get_db)):
+    """Campaigns awaiting admin approval."""
+    await _verify_admin(admin_id, db)
+    r = await db.execute(text("""
+        SELECT c.campaign_id, c.title,
+               COALESCE(c.description, '') AS description,
+               c.category, c.location,
+               c.funding_goal_cents, c.status, c.creator_id, c.time_created,
+               cr.name AS creator_name, cr.email AS creator_email
+        FROM campaigns c
+        LEFT JOIN creators cr ON cr.creator_id = c.creator_id
+        WHERE c.status = 'pending_review'
+        ORDER BY c.time_created DESC
+    """))
+    rows = r.mappings().all()
+    return {
+        "count": len(rows),
+        "pending": [{
+            "campaign_id": row["campaign_id"],
+            "title": row["title"],
+            "description": row["description"],
+            "category": row["category"],
+            "location": row["location"],
+            "funding_goal": (row["funding_goal_cents"] or 0) / 100,
+            "creator_id": row["creator_id"],
+            "creator_name": row["creator_name"] or "Unknown",
+            "creator_email": row["creator_email"],
+            "submitted_at": str(row["time_created"]) if row["time_created"] else None,
+        } for row in rows]
+    }
+
+
+@router.post("/campaigns/{campaign_id}/approve")
+async def approve_campaign(campaign_id: int, admin_id: int, db: AsyncSession = Depends(get_db)):
+    """Approve a pending campaign so it becomes visible to the public."""
+    await _verify_admin(admin_id, db)
+    r = await db.execute(text("""
+        UPDATE campaigns
+        SET status = 'active', reviewed_by = :aid, reviewed_at = NOW(), rejected_reason = NULL
+        WHERE campaign_id = :cid AND status = 'pending_review'
+        RETURNING campaign_id, title
+    """), {"cid": campaign_id, "aid": admin_id})
+    row = r.mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Campaign not found or already reviewed")
+    await _log(db, admin_id, "approve_campaign", "campaign", str(campaign_id), f"Approved: {row['title']}")
+    await db.commit()
+    return {"status": "approved", "campaign_id": campaign_id, "title": row["title"]}
+
+
+@router.post("/campaigns/{campaign_id}/reject")
+async def reject_campaign(campaign_id: int, admin_id: int, data: RejectCampaign,
+                           db: AsyncSession = Depends(get_db)):
+    """Reject a pending campaign with a reason."""
+    await _verify_admin(admin_id, db)
+    r = await db.execute(text("""
+        UPDATE campaigns
+        SET status = 'rejected', reviewed_by = :aid, reviewed_at = NOW(), rejected_reason = :reason
+        WHERE campaign_id = :cid AND status = 'pending_review'
+        RETURNING campaign_id, title
+    """), {"cid": campaign_id, "aid": admin_id, "reason": data.reason})
+    row = r.mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Campaign not found or already reviewed")
+    await _log(db, admin_id, "reject_campaign", "campaign", str(campaign_id),
+               f"Rejected: {row['title']} - {data.reason}")
+    await db.commit()
+    return {"status": "rejected", "campaign_id": campaign_id, "reason": data.reason}
+
+
+# ─── Tiered ban system (warning / soft_ban / full_ban) ─────────────────────
+
+@router.post("/users/{creator_id}/moderate")
+async def moderate_user(creator_id: str, admin_id: int, data: BanAction,
+                         db: AsyncSession = Depends(get_db)):
+    """
+    Tiered moderation:
+      - warning   = increment counter, auto-promote to full_ban at 3
+      - soft_ban  = user can never comment anywhere again (account stays open)
+      - full_ban  = account deactivated
+    """
+    await _verify_admin(admin_id, db)
+
+    if data.ban_type not in ("warning", "soft_ban", "full_ban"):
+        raise HTTPException(status_code=400, detail="ban_type must be warning, soft_ban, or full_ban")
+
+    r = await db.execute(text("SELECT creator_id, name FROM creators WHERE creator_id = :id"), {"id": creator_id})
+    creator = r.mappings().first()
+    if not creator:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    reason = data.reason or "Moderation action by site admin"
+
+    if data.ban_type == "warning":
+        r = await db.execute(text("""
+            UPDATE creators SET warning_count = COALESCE(warning_count, 0) + 1
+            WHERE creator_id = :id RETURNING warning_count
+        """), {"id": creator_id})
+        new_count = r.scalar()
+
+        await db.execute(text("""
+            INSERT INTO blocked_users (creator_id, reason, blocked_by, ban_type)
+            VALUES (:cid, :r, :aid, 'warning')
+        """), {"cid": creator_id, "r": reason, "aid": admin_id})
+
+        if new_count >= 3:
+            await db.execute(text("""
+                DELETE FROM blocked_users
+                WHERE creator_id = :cid AND ban_type IN ('soft_ban', 'full_ban')
+            """), {"cid": creator_id})
+            await db.execute(text("""
+                INSERT INTO blocked_users (creator_id, reason, blocked_by, ban_type)
+                VALUES (:cid, :r, :aid, 'full_ban')
+            """), {"cid": creator_id, "r": f"Auto-escalated after {new_count} warnings", "aid": admin_id})
+            await _log(db, admin_id, "auto_full_ban", "user", creator_id,
+                       f"Auto-full-ban after {new_count} warnings for {creator['name']}")
+            await db.commit()
+            return {"status": "full_ban", "auto_escalated": True, "warning_count": new_count,
+                    "message": f"{creator['name']} auto-banned after {new_count} warnings"}
+
+        await _log(db, admin_id, "warning", "user", creator_id,
+                   f"Warning #{new_count} issued to {creator['name']}: {reason}")
+        await db.commit()
+        return {"status": "warning", "warning_count": new_count,
+                "message": f"Warning #{new_count} of 3 issued"}
+
+    # soft_ban or full_ban
+    await db.execute(text("""
+        DELETE FROM blocked_users
+        WHERE creator_id = :cid AND ban_type IN ('soft_ban', 'full_ban')
+    """), {"cid": creator_id})
+    await db.execute(text("""
+        INSERT INTO blocked_users (creator_id, reason, blocked_by, ban_type)
+        VALUES (:cid, :r, :aid, :bt)
+    """), {"cid": creator_id, "r": reason, "aid": admin_id, "bt": data.ban_type})
+
+    action = data.ban_type
+    await _log(db, admin_id, action, "user", creator_id,
+               f"{action} applied to {creator['name']}: {reason}")
+    await db.commit()
+    return {"status": data.ban_type, "creator_id": creator_id}
+
+
+@router.post("/users/{creator_id}/lift-ban")
+async def lift_ban(creator_id: str, admin_id: int, db: AsyncSession = Depends(get_db)):
+    """Remove all active bans (soft and full) for a user. Warning history preserved."""
+    await _verify_admin(admin_id, db)
+    r = await db.execute(text("""
+        DELETE FROM blocked_users
+        WHERE creator_id = :cid AND ban_type IN ('soft_ban', 'full_ban')
+        RETURNING ban_id
+    """), {"cid": creator_id})
+    removed = len(r.all())
+    await _log(db, admin_id, "lift_ban", "user", creator_id, f"Lifted bans ({removed} rows)")
+    await db.commit()
+    return {"status": "lifted", "removed": removed}
+
+
+@router.post("/users/{creator_id}/reset-warnings")
+async def reset_warnings(creator_id: str, admin_id: int, db: AsyncSession = Depends(get_db)):
+    """Clear a user's warning history."""
+    await _verify_admin(admin_id, db)
+    await db.execute(text("UPDATE creators SET warning_count = 0 WHERE creator_id = :cid"),
+                     {"cid": creator_id})
+    await db.execute(text("DELETE FROM blocked_users WHERE creator_id = :cid AND ban_type = 'warning'"),
+                     {"cid": creator_id})
+    await _log(db, admin_id, "reset_warnings", "user", creator_id, "Warning count reset to 0")
+    await db.commit()
+    return {"status": "reset"}
+
+
+@router.get("/check-comment-permission")
+async def check_comment_permission(creator_id: str, db: AsyncSession = Depends(get_db)):
+    """
+    Public endpoint called by the comment-submission flow.
+    Returns {can_comment: bool, reason?: str}
+    """
+    r = await db.execute(text("""
+        SELECT ban_type, reason FROM blocked_users
+        WHERE creator_id = :cid AND ban_type IN ('soft_ban', 'full_ban')
+        ORDER BY blocked_at DESC LIMIT 1
+    """), {"cid": creator_id})
+    row = r.mappings().first()
+    if row:
+        return {"can_comment": False, "ban_type": row["ban_type"], "reason": row["reason"]}
+    return {"can_comment": True}
