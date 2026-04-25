@@ -63,7 +63,17 @@ from sqlalchemy.orm import DeclarativeBase
 # - postgresql://...
 # - postgres://...
 # - postgresql+asyncpg://...
-_raw_url = (os.getenv("DATABASE_URL") or "sqlite+aiosqlite:///./community_fundings.db").strip().strip('"').strip("'")
+_raw_url = (os.getenv("DATABASE_URL") or "").strip().strip('"').strip("'")
+if not _raw_url:
+    raise RuntimeError(
+        "DATABASE_URL is not set. Check your .env file. "
+        "Expected: cf-db.c9koc2u6iqqb.us-east-2.rds.amazonaws.com"
+    )
+if "cf-db.c9koc2u6iqqb.us-east-2.rds.amazonaws.com" not in _raw_url:
+    raise RuntimeError(
+        f"DATABASE_URL must point at cf-db RDS. Got: {_raw_url.split('@')[-1] if '@' in _raw_url else 'invalid'}"
+    )
+
 if _raw_url.startswith("postgres://"):
     _raw_url = "postgresql://" + _raw_url[len("postgres://"):]
 if _raw_url.startswith("postgresql://"):

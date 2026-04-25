@@ -11,3 +11,5 @@ node_modules/
 seed_demo_data.py
 seed_moderation.py
 mark_pending.py
+community_fundings.db
+community_fundings.db
