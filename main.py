@@ -42,9 +42,11 @@ from app.routes.refunds import router as refunds_router
 from app.routes.users import router as users_router
 from app.routes.updates import router as updates_router
 from app.routes.comments import router as comments_router
+from app.routes.ledger import router as ledger_router
 from app.routes.reports import router as reports_router
 from app.routes.uploads import router as uploads_router
 from app.routes.admin import router as admin_router
+from app.routes.site_admin import router as site_admin_router
 from app.routes.profile_page import router as profile_page_router
 from app.routes.locations import router as locations_router
 
@@ -118,9 +120,11 @@ app.include_router(refunds_router)
 app.include_router(users_router)
 app.include_router(updates_router)
 app.include_router(comments_router)
+app.include_router(ledger_router)
 app.include_router(reports_router)
 app.include_router(uploads_router)
 app.include_router(admin_router)
+app.include_router(site_admin_router)
 app.include_router(campaign_page_router)
 app.include_router(profile_page_router)
 app.include_router(follows_router)
@@ -128,7 +132,6 @@ app.include_router(saved_campaigns_router)
 app.include_router(notifications_router)
 app.include_router(locations_router)
 app.include_router(misc_reports_router)
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Auth Dependency
 # ─────────────────────────────────────────────────────────────────────────────
@@ -297,3 +300,17 @@ async def debug_echo_authorization(request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=4000, reload=True)
+
+# ── Stats endpoint (no prefix) ──────────────────────────────────────────
+from sqlalchemy import select, func as sqlfunc
+from app.database import get_db
+from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import Depends as Dep
+from app.models.models import Campaign
+
+@app.get("/api/stats")
+async def get_platform_stats(db: AsyncSession = Dep(get_db)):
+    total_campaigns = (await db.execute(select(sqlfunc.count(Campaign.id)))).scalar() or 0
+    total_raised = (await db.execute(select(sqlfunc.coalesce(sqlfunc.sum(Campaign.raised_amount), 0)))).scalar() or 0
+    total_donors = (await db.execute(select(sqlfunc.coalesce(sqlfunc.sum(Campaign.donors_count), 0)))).scalar() or 0
+    return {"total_campaigns": total_campaigns, "total_raised": float(total_raised), "total_donors": int(total_donors)}

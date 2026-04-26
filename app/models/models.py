@@ -82,18 +82,17 @@ class User(Base):
 
     id = Column("creator_id", String(50), primary_key=True, default=generate_uuid)
     email = Column(String(255), unique=True, nullable=True, index=True)
-    username = Column(String(30), unique=True, nullable=True, index=True)
     name = Column(String(255), nullable=True)
     last_name = Column(String(255), nullable=True)
     user_type = Column(Integer, default=0, server_default="0")
+    hashed_password = Column(String(255), nullable=True)
     bio = Column(Text, nullable=True)
     avatar_url = Column(Text, nullable=True)
-    website = Column(String(500), nullable=True)
-    hashed_password = Column(String(255), nullable=True)
-    phone_number = Column(String(50), nullable=True)
-    address = Column(String(500), nullable=True)
-    state = Column(String(100), nullable=True)
-    time_zone = Column(String(50), nullable=True)
+    email_verified = Column(Boolean, default=False)
+    is_admin = Column(Boolean, default=False)
+    stripe_customer_id = Column(String(255), nullable=True)
+    stripe_connect_account_id = Column(String(255), nullable=True)
+    stripe_connect_onboarded = Column(Boolean, default=False)
     created_at = Column("time_creation", DateTime(timezone=True), server_default=func.now())
 
     # Relationships
@@ -110,7 +109,7 @@ class Campaign(Base):
     id = Column("campaign_id", Integer, primary_key=True, autoincrement=True)
     title = Column(String(200), nullable=False)
     slug = Column("url", String(220), unique=True, nullable=True, index=True)
-    description = Column("description_html", Text, nullable=True)
+    description = Column("description", Text, nullable=True)
     goal_amount = Column("funding_goal_cents", BigInteger, nullable=True)
     raised_amount = Column("amount_raised_cents", BigInteger, default=0)
     creator_id = Column(String(50), ForeignKey("creators.creator_id"), nullable=True)
@@ -119,7 +118,6 @@ class Campaign(Base):
     category = Column(String(100), nullable=True, index=True)
     location = Column(String(255), nullable=True)
     end_date = Column(DateTime(timezone=True), nullable=True)
-    bio = Column(Text, nullable=True)
     duration_days = Column(Integer, nullable=True)
 
     created_at = Column("time_created", DateTime(timezone=True), server_default=func.now())
@@ -141,9 +139,9 @@ class Campaign(Base):
 class Donation(Base):
     __tablename__ = "donations"
 
-    id = Column(String(50), primary_key=True, default=generate_uuid)
-    campaign_id = Column(String(50), ForeignKey("campaigns.campaign_id"), nullable=False)
-    donor_id = Column(String(50), ForeignKey("creators.creator_id"), nullable=True)
+    id = Column("donation_id", BigInteger, primary_key=True, autoincrement=True)
+    campaign_id = Column("campaign_id", BigInteger, ForeignKey("campaigns.campaign_id"), nullable=False)
+    donor_id = Column("donor_creator_id", String(50), ForeignKey("creators.creator_id"), nullable=True)
     donor_name = Column(String(255), default="Anonymous")
     donor_email = Column(String(255), nullable=True)
     is_anonymous = Column(Boolean, default=False)
@@ -152,7 +150,6 @@ class Donation(Base):
     # Money
     amount = Column(Numeric(12, 2), nullable=False)
     platform_fee = Column(Numeric(12, 2), nullable=True)
-    processing_fee = Column(Numeric(12, 2), nullable=True)
     net_amount = Column(Numeric(12, 2), nullable=True)
     currency = Column(String(3), default="usd")
 
@@ -162,15 +159,10 @@ class Donation(Base):
     stripe_charge_id = Column(String(255), nullable=True)
 
     # Refund tracking
-    refund_amount = Column(Numeric(12, 2), nullable=True)
-    stripe_refund_id = Column(String(255), nullable=True)
 
-    status = Column(
-        Enum(DonationStatus), default=DonationStatus.PENDING, nullable=False, index=True
-    )
+    status = Column(String(50), default="pending", nullable=False, index=True)
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    created_at = Column("time_created", DateTime(timezone=True), server_default=func.now())
 
     # Relationships
     campaign = relationship("Campaign")
@@ -179,7 +171,7 @@ class Donation(Base):
 
     __table_args__ = (
         Index("idx_donations_campaign_status", "campaign_id", "status"),
-        Index("idx_donations_donor", "donor_id"),
+        Index("idx_donations_donor", "donor_creator_id"),
     )
 
 
@@ -191,13 +183,12 @@ class RefundRequest(Base):
     __tablename__ = "refund_requests"
 
     id = Column(String(50), primary_key=True, default=generate_uuid)
-    donation_id = Column(String(50), ForeignKey("donations.id"), nullable=False)
+    donation_id = Column(String(50), ForeignKey("donations.donation_id"), nullable=False)
     requester_id = Column(String(50), ForeignKey("creators.creator_id"), nullable=False)
     reason = Column(Text, nullable=False)
     amount = Column(Numeric(12, 2), nullable=True)  # null = full refund
     status = Column(Enum(RefundStatus), default=RefundStatus.REQUESTED, nullable=False)
     admin_notes = Column(Text, nullable=True)
-    stripe_refund_id = Column(String(255), nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     resolved_at = Column(DateTime(timezone=True), nullable=True)
@@ -257,13 +248,13 @@ class CampaignUpdate(Base):
 class Comment(Base):
     __tablename__ = "comments"
 
-    id = Column(String(50), primary_key=True, default=generate_uuid)
-    campaign_id = Column(String(50), ForeignKey("campaigns.campaign_id"), nullable=False)
-    user_id = Column(String(50), ForeignKey("creators.creator_id"), nullable=False)
-    content = Column(Text, nullable=False)
-    is_hidden = Column(Boolean, default=False)  # admin can hide
+    id = Column("comment_id", BigInteger, primary_key=True, autoincrement=True)
+    campaign_id = Column("campaign_id", BigInteger, ForeignKey("campaigns.campaign_id"), nullable=False)
+    user_id = Column("creator_id", String(50), ForeignKey("creators.creator_id"), nullable=False)
+    content = Column("comment_text", Text, nullable=False)
+    is_hidden = Column(Boolean, default=False)
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_at = Column("time_created", DateTime(timezone=True), server_default=func.now())
 
     campaign = relationship("Campaign")
     user = relationship("User")
@@ -329,7 +320,6 @@ class BillingAddress(Base):
     address_line1 = Column(String(255), nullable=False)
     address_line2 = Column(String(255), nullable=True)
     city = Column(String(100), nullable=False)
-    state = Column(String(100), nullable=True)
     postal_code = Column(String(20), nullable=False)
     country = Column(String(2), default="US")
     is_default = Column(Boolean, default=True)

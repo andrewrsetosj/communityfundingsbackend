@@ -69,10 +69,8 @@ def build_campaign_response(
         category=c.category,
         location=c.location,
         end_date=c.end_date,
-        bio=c.bio,
         duration_days=c.duration_days,
-        funding_percentage=pct,
-        days_left=days_left,
+        funding_percentage=pct, days_left=days_left,
         created_at=c.created_at,
         image_url=image_url,
         content_type=content_type,
@@ -193,7 +191,7 @@ async def list_campaigns(
                 c.campaign_id AS id,
                 c.title,
                 c.url AS slug,
-                c.description_html AS description,
+                c.description AS description,
                 COALESCE(c.funding_goal_cents, 0) / 100.0 AS goal_amount,
                 COALESCE(c.amount_raised_cents, 0) / 100.0 AS raised_amount,
                 c.creator_id,
@@ -203,7 +201,7 @@ async def list_campaigns(
                 c.category,
                 c.location,
                 c.end_date,
-                c.bio,
+                
                 c.duration_days,
                 CASE
                     WHEN COALESCE(c.funding_goal_cents, 0) > 0
@@ -397,7 +395,7 @@ async def my_organizations(user: User = Depends(get_current_user)):
     async with pool.acquire() as conn:
         orgs = await conn.fetch(
             """
-            SELECT c.creator_id, c.name, c.last_name, c.bio
+            SELECT c.creator_id, c.name, c.last_name, 
             FROM organization_members om
             JOIN creators c ON c.creator_id = om.organization_id
             WHERE om.member_id = $1
@@ -704,7 +702,7 @@ async def get_campaign(campaign_id_or_slug: str, db: AsyncSession = Depends(get_
     """Get campaign by ID or URL slug."""
     result = await db.execute(
         select(Campaign).options(selectinload(Campaign.creator)).where(
-            or_(Campaign.id == campaign_id_or_slug, Campaign.slug == campaign_id_or_slug)
+            or_(Campaign.id == int(campaign_id_or_slug) if campaign_id_or_slug.isdigit() else False, Campaign.slug == campaign_id_or_slug)
         )
     )
     campaign = result.scalar_one_or_none()
@@ -756,7 +754,7 @@ async def update_campaign(
     db: AsyncSession = Depends(get_db),
 ):
     """Edit a campaign. Only the creator can edit. Cannot edit funded/cancelled campaigns."""
-    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    result = await db.execute(select(Campaign).where(Campaign.id == int(campaign_id)))
     campaign = result.scalar_one_or_none()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -789,7 +787,7 @@ async def publish_campaign(
     db: AsyncSession = Depends(get_db),
 ):
     """Publish a draft campaign (makes it active and accepting donations)."""
-    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    result = await db.execute(select(Campaign).where(Campaign.id == int(campaign_id)))
     campaign = result.scalar_one_or_none()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -813,7 +811,7 @@ async def cancel_campaign(
 ):
     """Cancel a campaign. Only creator. Cannot cancel if already funded."""
     result = await db.execute(
-        select(Campaign).where(Campaign.id == campaign_id)
+        select(Campaign).where(Campaign.id == int(campaign_id))
     )
     campaign = result.scalar_one_or_none()
     if not campaign:
@@ -823,6 +821,7 @@ async def cancel_campaign(
     if campaign.status == "funded":
         raise HTTPException(status_code=400, detail="Cannot cancel a funded campaign")
 
-    campaign.status = "cancelled"
-    await db.commit()
-    return {"status": "cancelled", "campaign_id": campaign_id}
+    campaign.status = CampaignStatus.CANCELLED
+    await db.flush()
+    return build_campaign_response(campaign, creator_name=user.name)
+

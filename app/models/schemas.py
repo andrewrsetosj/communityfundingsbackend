@@ -61,11 +61,9 @@ class UserResponse(BaseModel):
     last_name: Optional[str] = None
     user_type: Optional[int] = None
     bio: Optional[str] = None
-    phone_number: Optional[str] = None
-    address: Optional[str] = None
-    state: Optional[str] = None
-    time_zone: Optional[str] = None
-    website: Optional[str] = None
+    avatar_url: Optional[str] = None
+    email_verified: bool = False
+    stripe_connect_onboarded: bool = False
     created_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
@@ -86,6 +84,8 @@ class UserPublicResponse(BaseModel):
     time_zone: Optional[str] = None
     website: Optional[str] = None
     avatar_url: Optional[str] = None
+    email_verified: bool = False
+    stripe_connect_onboarded: bool = False
     created_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
@@ -97,12 +97,9 @@ class UserProfileUpdate(BaseModel):
     last_name: Optional[str] = None
     username: Optional[str] = Field(None, min_length=3, max_length=30)
     bio: Optional[str] = None
-    phone_number: Optional[str] = None
-    address: Optional[str] = None
-    state: Optional[str] = None
-    time_zone: Optional[str] = None
-    website: Optional[str] = None
-    user_type: Optional[int] = None
+    avatar_url: Optional[str] = None
+    email_verified: bool = False
+    stripe_connect_onboarded: bool = False
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -116,7 +113,6 @@ class CampaignCreate(BaseModel):
     category: Optional[str] = None
     location: Optional[str] = None
     end_date: Optional[str] = None  # ISO format
-    bio: Optional[str] = None
     duration_days: Optional[int] = None
 
 
@@ -126,7 +122,6 @@ class CampaignUpdate(BaseModel):
     category: Optional[str] = None
     location: Optional[str] = None
     end_date: Optional[str] = None
-    bio: Optional[str] = None
     duration_days: Optional[int] = None
 
 
@@ -144,7 +139,6 @@ class CampaignResponse(BaseModel):
     category: Optional[str] = None
     location: Optional[str] = None
     end_date: Optional[datetime] = None
-    bio: Optional[str] = None
     duration_days: Optional[int] = None
     funding_percentage: float = 0.0
     days_left: Optional[int] = None

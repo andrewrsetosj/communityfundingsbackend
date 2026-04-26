@@ -6,3 +6,10 @@ __pycache__/
 *.db
 .DS_Store
 node_modules/
+
+# Demo seeders — local tooling only
+seed_demo_data.py
+seed_moderation.py
+mark_pending.py
+community_fundings.db
+community_fundings.db

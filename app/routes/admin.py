@@ -26,33 +26,27 @@ async def admin_stats(
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Platform-wide statistics."""
-    users_count = (await db.execute(select(sqlfunc.count(User.id)))).scalar() or 0
-    campaigns_count = (await db.execute(select(sqlfunc.count(Campaign.id)))).scalar() or 0
-    active_campaigns = (await db.execute(
-        select(sqlfunc.count(Campaign.id)).where(Campaign.status == CampaignStatus.ACTIVE)
-    )).scalar() or 0
-    total_raised = (await db.execute(
-        select(sqlfunc.sum(Donation.amount)).where(Donation.status == DonationStatus.SUCCEEDED)
-    )).scalar() or 0
-    total_donations = (await db.execute(
-        select(sqlfunc.count(Donation.id)).where(Donation.status == DonationStatus.SUCCEEDED)
-    )).scalar() or 0
-    open_reports = (await db.execute(
-        select(sqlfunc.count(Report.id)).where(Report.status == ReportStatus.OPEN)
-    )).scalar() or 0
-    pending_refunds = (await db.execute(
-        select(sqlfunc.count(RefundRequest.id)).where(RefundRequest.status == RefundStatus.REQUESTED)
-    )).scalar() or 0
-
+    """Platform-wide statistics using raw SQL for RDS compatibility."""
+    from sqlalchemy import text
+    r = await db.execute(text("""
+        SELECT
+            (SELECT COUNT(*) FROM creators) as users,
+            (SELECT COUNT(*) FROM campaigns) as campaigns,
+            (SELECT COUNT(*) FROM campaigns WHERE status='active') as active_campaigns,
+            (SELECT COALESCE(SUM(amount),0) FROM donations WHERE status='succeeded') as total_raised,
+            (SELECT COUNT(*) FROM donations WHERE status='succeeded') as total_donations,
+            (SELECT COUNT(*) FROM reports) as open_reports,
+            0 as pending_refunds
+    """))
+    row = r.mappings().first()
     return {
-        "users": users_count,
-        "campaigns": campaigns_count,
-        "active_campaigns": active_campaigns,
-        "total_raised": float(total_raised),
-        "total_donations": total_donations,
-        "open_reports": open_reports,
-        "pending_refunds": pending_refunds,
+        "users": row["users"],
+        "campaigns": row["campaigns"],
+        "active_campaigns": row["active_campaigns"],
+        "total_raised": float(row["total_raised"]),
+        "total_donations": row["total_donations"],
+        "open_reports": row["open_reports"],
+        "pending_refunds": row["pending_refunds"],
     }
 
 
@@ -192,3 +186,120 @@ async def pending_refunds(
         }
         for r in result.scalars().all()
     ]
+
+# ── Delete campaign (archive to deleted_campaigns) ─────────────────────────
+
+@router.post("/campaigns/{campaign_id}/delete")
+async def delete_campaign(
+    campaign_id: str,
+    reason: str = "Admin removal",
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a campaign by archiving it to deleted_campaigns, then removing from campaigns."""
+    from sqlalchemy import text
+    cid = int(campaign_id) if campaign_id.isdigit() else 0
+    if not cid:
+        raise HTTPException(status_code=400, detail="Invalid campaign ID")
+
+    # Check campaign exists
+    result = await db.execute(select(Campaign).where(Campaign.id == cid))
+    campaign = result.scalar_one_or_none()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    # Archive to deleted_campaigns
+    await db.execute(text("""
+        INSERT INTO deleted_campaigns (campaign_id, creator_id, title, status, description, category, location,
+            funding_goal_cents, amount_raised_cents, backers, url, end_date, duration_days, time_created,
+            deleted_by, deletion_reason)
+        SELECT campaign_id, creator_id, title, status, description, category, location,
+            funding_goal_cents, amount_raised_cents, backers, url, end_date, duration_days, time_created,
+            :admin_id, :reason
+        FROM campaigns WHERE campaign_id = :cid
+    """), {"cid": cid, "admin_id": admin.id, "reason": reason})
+
+    # Delete from campaigns
+    await db.execute(text("DELETE FROM campaigns WHERE campaign_id = :cid"), {"cid": cid})
+    await db.commit()
+
+    return {"status": "deleted", "campaign_id": cid, "reason": reason, "archived": True}
+
+
+@router.get("/campaigns/deleted")
+async def list_deleted_campaigns(
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all deleted/archived campaigns."""
+    from sqlalchemy import text
+    result = await db.execute(text("""
+        SELECT campaign_id, title, creator_id, status, category, location,
+               funding_goal_cents, amount_raised_cents, backers,
+               time_created, deleted_at, deleted_by, deletion_reason
+        FROM deleted_campaigns ORDER BY deleted_at DESC
+    """))
+    rows = result.mappings().all()
+    return [{
+        "campaign_id": r["campaign_id"], "title": r["title"], "creator_id": r["creator_id"],
+        "status": r["status"], "category": r["category"], "location": r["location"],
+        "goal": (r["funding_goal_cents"] or 0) / 100, "raised": (r["amount_raised_cents"] or 0) / 100,
+        "backers": r["backers"], "created_at": str(r["time_created"]),
+        "deleted_at": str(r["deleted_at"]), "deleted_by": r["deleted_by"],
+        "reason": r["deletion_reason"],
+    } for r in rows]
+
+
+@router.get("/campaigns/reported")
+async def reported_campaigns(
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get all campaigns that have been reported."""
+    from sqlalchemy import text
+    result = await db.execute(text("""
+        SELECT DISTINCT c.campaign_id, c.title, c.creator_id, c.status, c.category, c.location,
+               c.funding_goal_cents, c.amount_raised_cents, c.backers, c.time_created,
+               cr.name as creator_name,
+               (SELECT COUNT(*) FROM reports r WHERE r.campaign_id = c.campaign_id) as report_count
+        FROM campaigns c
+        JOIN reports r ON r.campaign_id = c.campaign_id
+        LEFT JOIN creators cr ON cr.creator_id = c.creator_id
+        ORDER BY report_count DESC
+    """))
+    rows = result.mappings().all()
+    return [{
+        "campaign_id": r["campaign_id"], "title": r["title"],
+        "creator_id": r["creator_id"], "creator_name": r["creator_name"],
+        "status": r["status"], "category": r["category"],
+        "goal": (r["funding_goal_cents"] or 0) / 100,
+        "raised": (r["amount_raised_cents"] or 0) / 100,
+        "backers": r["backers"], "report_count": r["report_count"],
+        "created_at": str(r["time_created"]),
+    } for r in rows]
+
+
+@router.post("/campaigns/{campaign_id}/restore")
+async def restore_campaign(
+    campaign_id: str,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Restore a deleted campaign from archive."""
+    from sqlalchemy import text
+    cid = int(campaign_id) if campaign_id.isdigit() else 0
+    if not cid:
+        raise HTTPException(status_code=400, detail="Invalid campaign ID")
+    check = await db.execute(text("SELECT campaign_id FROM deleted_campaigns WHERE campaign_id = :cid"), {"cid": cid})
+    if not check.first():
+        raise HTTPException(status_code=404, detail="Deleted campaign not found")
+    await db.execute(text("""
+        INSERT INTO campaigns (campaign_id, creator_id, title, status, description, category, location,
+            funding_goal_cents, amount_raised_cents, backers, url, end_date, duration_days, time_created)
+        SELECT campaign_id, creator_id, title, 'active', description, category, location,
+            funding_goal_cents, amount_raised_cents, backers, url, end_date, duration_days, time_created
+        FROM deleted_campaigns WHERE campaign_id = :cid
+    """), {"cid": cid})
+    await db.execute(text("DELETE FROM deleted_campaigns WHERE campaign_id = :cid"), {"cid": cid})
+    await db.commit()
+    return {"status": "restored", "campaign_id": cid}
