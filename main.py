@@ -260,7 +260,7 @@ async def verify_and_store(request: Request):
         pool = await get_pool()
         async with pool.acquire() as conn:
             stored = await conn.fetchrow(
-                "SELECT creator_id, first_name, last_name, email, time_creation, is_business FROM creators WHERE creator_id = $1",
+                "SELECT * FROM creators WHERE creator_id = $1",
                 str(clerk_id),
             )
             print("DEBUG: stored row after upsert:", dict(stored) if stored else None)
