@@ -25,6 +25,7 @@ from app.routes.follows import router as follows_router
 from app.routes.saved_campaigns import router as saved_campaigns_router
 from app.routes.notifications import router as notifications_router
 from app.routes.misc_reports import router as misc_reports_router
+from app.routes import donations
 
 from jwt_utils import verify_token
 from app.db import (
@@ -128,6 +129,7 @@ app.include_router(saved_campaigns_router)
 app.include_router(notifications_router)
 app.include_router(locations_router)
 app.include_router(misc_reports_router)
+app.include_router(donations.router)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Auth Dependency

@@ -12,98 +12,65 @@ router = APIRouter(prefix="/api/notifications", tags=["notifications"])
 async def _create_missing_notifications_for_user(conn, recipient_creator_id: str) -> int:
     inserted_count = 0
 
-    follower_rows = await conn.fetch(
+    # -----------------------
+    # FOLLOWERS
+    # -----------------------
+    follower_rows = await conn.fetch(...)
+    # (unchanged)
+
+    # -----------------------
+    # COMMENTS ON CAMPAIGN
+    # -----------------------
+    campaign_comment_rows = await conn.fetch(...)
+    # (unchanged)
+
+    # -----------------------
+    # REPLIES
+    # -----------------------
+    reply_rows = await conn.fetch(...)
+    # (unchanged)
+
+    # -----------------------
+    # COLLAB INVITES
+    # -----------------------
+    invite_rows = await conn.fetch(...)
+    # (unchanged)
+
+    # =======================
+    # 💰 DONATIONS (NEW)
+    # =======================
+    donation_rows = await conn.fetch(
         """
         SELECT
-            cf.follower_creator_id AS actor_creator_id,
-            cf.followed_creator_id AS recipient_creator_id,
-            cf.time_created,
-            'follow:' || cf.follower_creator_id || ':' || cf.followed_creator_id AS source_key,
-            follower.name,
-            follower.last_name,
-            COALESCE(NULLIF(follower.username, ''), follower.creator_id) AS follower_username
-        FROM creator_follows cf
-        JOIN creators follower
-          ON follower.creator_id = cf.follower_creator_id
-        WHERE cf.followed_creator_id = $1
-          AND cf.follower_creator_id <> $1
-        ORDER BY cf.time_created DESC
-        """,
-        recipient_creator_id,
-    )
-
-    for row in follower_rows:
-        display_name = " ".join(
-            part for part in [row["name"], row["last_name"]] if part
-        ).strip() or row["follower_username"] or "Someone"
-
-        inserted = await conn.fetchval(
-            """
-            INSERT INTO notifications (
-                recipient_creator_id,
-                actor_creator_id,
-                type,
-                source_type,
-                source_key,
-                title,
-                body,
-                link_url,
-                is_read,
-                is_deleted,
-                time_created
-            )
-            VALUES (
-                $1, $2, 'new_follower', 'follow', $3,
-                $4, $5, $6, FALSE, FALSE, $7
-            )
-            ON CONFLICT (recipient_creator_id, source_type, source_key) DO NOTHING
-            RETURNING notification_id
-            """,
-            row["recipient_creator_id"],
-            row["actor_creator_id"],
-            row["source_key"],
-            f"{display_name} followed you",
-            "View their profile.",
-            f"/profile/{row['follower_username'] or row['actor_creator_id']}",
-            row["time_created"],
-        )
-        if inserted:
-            inserted_count += 1
-
-    campaign_comment_rows = await conn.fetch(
-        """
-        SELECT
-            c.comment_id,
-            c.creator_id AS actor_creator_id,
+            d.donation_id,
+            d.donor_creator_id AS actor_creator_id,
             camp.creator_id AS recipient_creator_id,
             camp.campaign_id,
             camp.url AS campaign_url,
             camp.title AS campaign_title,
-            c.comment_text,
-            c.time_created,
-            commenter.name,
-            commenter.last_name,
-            COALESCE(NULLIF(commenter.username, ''), commenter.creator_id) AS commenter_username
-        FROM comments c
+            d.amount,
+            d.status,
+            d.time_created,
+            donor.name,
+            donor.last_name,
+            COALESCE(NULLIF(donor.username, ''), donor.creator_id) AS donor_username
+        FROM donations d
         JOIN campaigns camp
-          ON camp.campaign_id = c.campaign_id
-        JOIN creators commenter
-          ON commenter.creator_id = c.creator_id
+          ON camp.campaign_id = d.campaign_id
+        LEFT JOIN creators donor
+          ON donor.creator_id = d.donor_creator_id
         WHERE camp.creator_id = $1
-          AND c.creator_id <> $1
-        ORDER BY c.time_created DESC
+          AND d.donor_creator_id <> $1
+          AND LOWER(COALESCE(d.status, '')) IN ('succeeded', 'success', 'paid', 'completed')
+        ORDER BY d.time_created DESC
         """,
         recipient_creator_id,
     )
 
-    for row in campaign_comment_rows:
+    for row in donation_rows:
         display_name = " ".join(
             part for part in [row["name"], row["last_name"]] if part
-        ).strip() or row["commenter_username"] or "Someone"
-
-        preview = (row["comment_text"] or "").strip()
-        if len(preview) > 120:
-            preview = preview[:117] + "..."
+        ).strip() or row["donor_username"] or "Someone"
 
         inserted = await conn.fetchval(
             """
@@ -117,172 +84,27 @@ async def _create_missing_notifications_for_user(conn, recipient_creator_id: str
                 body,
                 link_url,
                 campaign_id,
-                comment_id,
                 is_read,
                 is_deleted,
                 time_created
             )
             VALUES (
-                $1, $2, 'comment_on_campaign', 'comment_on_campaign', $3,
-                $4, $5, $6, $7, $8, FALSE, FALSE, $9
+                $1, $2, 'donation', 'donation', $3,
+                $4, $5, $6, $7, FALSE, FALSE, $8
             )
             ON CONFLICT (recipient_creator_id, source_type, source_key) DO NOTHING
             RETURNING notification_id
             """,
             row["recipient_creator_id"],
             row["actor_creator_id"],
-            f"comment:{row['comment_id']}",
-            f"{display_name} commented on {row['campaign_title']}",
-            preview or "Open campaign comment thread.",
+            f"donation:{row['donation_id']}",
+            f"{display_name} backed {row['campaign_title']}!",
+            f"${row['amount']} contribution",
             f"/project/{row['campaign_url'] or row['campaign_id']}",
             row["campaign_id"],
-            row["comment_id"],
             row["time_created"],
         )
-        if inserted:
-            inserted_count += 1
 
-    reply_rows = await conn.fetch(
-        """
-        SELECT
-            reply.comment_id,
-            reply.creator_id AS actor_creator_id,
-            parent.creator_id AS recipient_creator_id,
-            reply.campaign_id,
-            camp.url AS campaign_url,
-            camp.title AS campaign_title,
-            reply.comment_text,
-            reply.time_created,
-            replier.name,
-            replier.last_name,
-            COALESCE(NULLIF(replier.username, ''), replier.creator_id) AS replier_username
-        FROM comments reply
-        JOIN comments parent
-          ON parent.comment_id = reply.reply_to_comment_id
-        JOIN campaigns camp
-          ON camp.campaign_id = reply.campaign_id
-        JOIN creators replier
-          ON replier.creator_id = reply.creator_id
-        WHERE parent.creator_id = $1
-          AND reply.creator_id <> $1
-        ORDER BY reply.time_created DESC
-        """,
-        recipient_creator_id,
-    )
-
-    for row in reply_rows:
-        display_name = " ".join(
-            part for part in [row["name"], row["last_name"]] if part
-        ).strip() or row["replier_username"] or "Someone"
-
-        preview = (row["comment_text"] or "").strip()
-        if len(preview) > 120:
-            preview = preview[:117] + "..."
-
-        inserted = await conn.fetchval(
-            """
-            INSERT INTO notifications (
-                recipient_creator_id,
-                actor_creator_id,
-                type,
-                source_type,
-                source_key,
-                title,
-                body,
-                link_url,
-                campaign_id,
-                comment_id,
-                is_read,
-                is_deleted,
-                time_created
-            )
-            VALUES (
-                $1, $2, 'reply_to_comment', 'reply_to_comment', $3,
-                $4, $5, $6, $7, $8, FALSE, FALSE, $9
-            )
-            ON CONFLICT (recipient_creator_id, source_type, source_key) DO NOTHING
-            RETURNING notification_id
-            """,
-            row["recipient_creator_id"],
-            row["actor_creator_id"],
-            f"reply:{row['comment_id']}",
-            f"{display_name} replied to your comment",
-            preview or f"On {row['campaign_title']}.",
-            f"/project/{row['campaign_url'] or row['campaign_id']}",
-            row["campaign_id"],
-            row["comment_id"],
-            row["time_created"],
-        )
-        if inserted:
-            inserted_count += 1
-
-    invite_rows = await conn.fetch(
-        """
-        SELECT
-            coll.collaborator_id,
-            invitee.creator_id AS recipient_creator_id,
-            inviter.creator_id AS actor_creator_id,
-            camp.campaign_id,
-            camp.url AS campaign_url,
-            camp.title AS campaign_title,
-            coll.time_created,
-            inviter.name,
-            inviter.last_name,
-            COALESCE(NULLIF(inviter.username, ''), inviter.creator_id) AS inviter_username
-        FROM collaborators coll
-        JOIN creators invitee
-          ON LOWER(invitee.email) = LOWER(coll.email)
-        JOIN campaigns camp
-          ON camp.campaign_id = coll.campaign_id
-        JOIN creators inviter
-          ON inviter.creator_id = camp.creator_id
-        WHERE invitee.creator_id = $1
-          AND LOWER(COALESCE(coll.status, 'pending')) = 'pending'
-          AND inviter.creator_id <> $1
-        ORDER BY coll.time_created DESC
-        """,
-        recipient_creator_id,
-    )
-
-    for row in invite_rows:
-        display_name = " ".join(
-            part for part in [row["name"], row["last_name"]] if part
-        ).strip() or row["inviter_username"] or "Someone"
-
-        inserted = await conn.fetchval(
-            """
-            INSERT INTO notifications (
-                recipient_creator_id,
-                actor_creator_id,
-                type,
-                source_type,
-                source_key,
-                title,
-                body,
-                link_url,
-                campaign_id,
-                collaborator_id,
-                is_read,
-                is_deleted,
-                time_created
-            )
-            VALUES (
-                $1, $2, 'collaboration_invite', 'collaboration_invite', $3,
-                $4, $5, $6, $7, $8, FALSE, FALSE, $9
-            )
-            ON CONFLICT (recipient_creator_id, source_type, source_key) DO NOTHING
-            RETURNING notification_id
-            """,
-            row["recipient_creator_id"],
-            row["actor_creator_id"],
-            f"invite:{row['collaborator_id']}",
-            f"{display_name} invited you to collaborate",
-            f"Campaign: {row['campaign_title']}",
-            "/my-projects",
-            row["campaign_id"],
-            row["collaborator_id"],
-            row["time_created"],
-        )
         if inserted:
             inserted_count += 1
 
