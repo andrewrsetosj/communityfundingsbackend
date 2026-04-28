@@ -129,6 +129,17 @@ async def init_db() -> None:
             await conn.execute(f"""
                 ALTER TABLE creators ADD COLUMN IF NOT EXISTS {col} {col_type};
             """)
+        # Ensure bio is TEXT (no length cap) — ADD COLUMN IF NOT EXISTS won't
+        # change the type if the column was already created as varchar(N).
+        await conn.execute("""
+            ALTER TABLE creators ALTER COLUMN bio TYPE text;
+        """)
+        # Ensure long-content columns in campaigns are TEXT — they may have been
+        # created as varchar(N) in an older migration and reject long content.
+        for col in ("description_html", "bio"):
+            await conn.execute(f"""
+                ALTER TABLE public.campaigns ALTER COLUMN {col} TYPE text;
+            """)
     print("✅ asyncpg creators table ensured")
 
 

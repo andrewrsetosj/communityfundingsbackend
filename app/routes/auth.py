@@ -30,6 +30,7 @@ async def register(data: RegisterRequest, db: AsyncSession = Depends(get_db)):
         email=data.email,
         name=data.name,
         hashed_password=hash_password(data.password),
+        user_type=1,
     )
     db.add(user)
     await db.flush()
@@ -247,12 +248,14 @@ async def clerk_sync(data: ClerkSyncRequest, db: AsyncSession = Depends(get_db))
                     email=data.email,
                     name=data.name,
                     hashed_password=hash_password(f"clerk_synced_{data.email or data.clerk_id}"),
+                    user_type=1,
                 )
                 db.add(user)
                 await db.flush()
                 print(f"[clerk-sync] created new user id={user.id}")
 
         # Keep backend user info updated from Clerk
+        user.user_type = 1  # always individual for Clerk users
 
         if data.email:
             user.email = data.email
@@ -270,3 +273,45 @@ async def clerk_sync(data: ClerkSyncRequest, db: AsyncSession = Depends(get_db))
         print(f"[clerk-sync] ERROR: {e}")
         traceback.print_exc()
         raise
+
+
+class RegisterBusinessRequest(BaseModel):
+    email: str
+    name: str
+    password: str
+    owner_id: Optional[str] = None
+
+
+@router.post("/register-business")
+async def register_business(data: RegisterBusinessRequest, db: AsyncSession = Depends(get_db)):
+    """Create a business account (no Clerk) and optionally add owner to organization_members."""
+    existing = await db.execute(select(User).where(User.email == data.email))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="Email already registered")
+
+    user = User(
+        email=data.email,
+        name=data.name,
+        hashed_password=hash_password(data.password),
+        user_type=0,
+    )
+    db.add(user)
+    await db.flush()
+
+    if data.owner_id:
+        await db.execute(
+            text(
+                "INSERT INTO organization_members "
+                "(member_id, organization_id, role, added_by) "
+                "VALUES (:member_id, :organization_id, :role, :added_by)"
+            ),
+            {
+                "member_id": data.owner_id,
+                "organization_id": user.id,
+                "role": "owner",
+                "added_by": data.owner_id,
+            },
+        )
+
+    token = create_access_token(user.id)
+    return {"access_token": token, "user": {"id": user.id, "email": user.email, "name": user.name}}
