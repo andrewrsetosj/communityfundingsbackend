@@ -25,6 +25,7 @@ from app.routes.follows import router as follows_router
 from app.routes.saved_campaigns import router as saved_campaigns_router
 from app.routes.notifications import router as notifications_router
 from app.routes.misc_reports import router as misc_reports_router
+from app.routes import donations
 
 from jwt_utils import verify_token
 from app.db import (
@@ -86,9 +87,22 @@ app = FastAPI(
 # CORS
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _cors_allow_origins() -> list[str]:
+    """Local dev defaults + FRONTEND_URL + optional comma-separated CORS_ORIGINS."""
+    origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    for raw in (
+        os.getenv("FRONTEND_URL", ""),
+        *(os.getenv("CORS_ORIGINS", "").split(",")),
+    ):
+        o = raw.strip().rstrip("/")
+        if o and o not in origins:
+            origins.append(o)
+    return origins
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=_cors_allow_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -117,6 +131,7 @@ app.include_router(notifications_router)
 app.include_router(organizations_router)
 app.include_router(locations_router)
 app.include_router(misc_reports_router)
+app.include_router(donations.router)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Auth Dependency
@@ -246,7 +261,7 @@ async def verify_and_store(request: Request):
         pool = await get_pool()
         async with pool.acquire() as conn:
             stored = await conn.fetchrow(
-                "SELECT creator_id, first_name, last_name, email, time_creation, is_business FROM creators WHERE creator_id = $1",
+                "SELECT * FROM creators WHERE creator_id = $1",
                 str(clerk_id),
             )
             print("DEBUG: stored row after upsert:", dict(stored) if stored else None)
