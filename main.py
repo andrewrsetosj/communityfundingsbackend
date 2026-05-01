@@ -46,7 +46,8 @@ from app.routes.comments import router as comments_router
 from app.routes.reports import router as reports_router
 from app.routes.uploads import router as uploads_router
 from app.routes.admin import router as admin_router
-from app.routes.site_admin import router as site_admin_router  # v100_tier2
+from app.routes.site_admin import router as site_admin_router
+from app.routes.campaign_reports_v2 import router as campaign_reports_v2_router  # v100_t25  # v100_tier2
 from app.routes.profile_page import router as profile_page_router
 from app.routes.organizations import router as organizations_router
 from app.routes.locations import router as locations_router
@@ -126,7 +127,8 @@ app.include_router(comments_router)
 app.include_router(reports_router)
 app.include_router(uploads_router)
 app.include_router(admin_router)
-app.include_router(site_admin_router)  # v100_tier2
+app.include_router(site_admin_router)
+app.include_router(campaign_reports_v2_router)  # v100_t25  # v100_tier2
 app.include_router(campaign_page_router)
 app.include_router(profile_page_router)
 app.include_router(follows_router)

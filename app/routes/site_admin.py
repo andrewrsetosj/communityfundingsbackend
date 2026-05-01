@@ -429,13 +429,14 @@ async def delete_campaign(campaign_id: int, admin_id: int,
                           reason: str = "Policy violation",
                           db: AsyncSession = Depends(get_db)):
     await _verify_admin(admin_id, db)
+    # v100_t25_marker — aligned to cf-db deleted_campaigns schema
+    # Real columns: deletion_id (auto), campaign_id, title, creator_id,
+    #               reason, deleted_by, deleted_at (auto), original_status
     await db.execute(text("""
-        INSERT INTO deleted_campaigns (campaign_id, creator_id, title, status, description, category, location,
-            funding_goal_cents, amount_raised_cents, backers, url, time_created, deleted_by, deletion_reason)
-        SELECT campaign_id, creator_id, title, status, description, category, location,
-            funding_goal_cents, amount_raised_cents, backers, url, time_created, :a, :r
+        INSERT INTO deleted_campaigns (campaign_id, title, creator_id, reason, deleted_by, original_status)
+        SELECT campaign_id, title, creator_id, :r, :a, status
         FROM campaigns WHERE campaign_id = :cid
-    """), {"cid": campaign_id, "a": str(admin_id), "r": reason})
+    """), {"cid": campaign_id, "a": admin_id, "r": reason})
     await db.execute(text("DELETE FROM campaigns WHERE campaign_id = :cid"), {"cid": campaign_id})
     try:
         await db.execute(text("DELETE FROM campaign_reports WHERE CAST(reported_campaign_id AS TEXT) = :c"),
@@ -1044,3 +1045,150 @@ async def check_comment_permission(creator_id: str, db: AsyncSession = Depends(g
     if row:
         return {"can_comment": False, "ban_type": row["ban_type"], "reason": row["reason"]}
     return {"can_comment": True}
+
+# ─── Tier 2.5: Report admin actions ────────────────────────────────────
+
+async def _notify_creator(db, recipient_creator_id: str, actor_id: str | None,
+                          n_type: str, source_key: str, title: str,
+                          body: str, link_url: str | None = None,
+                          campaign_id: int | None = None):
+    """
+    Insert a row into the existing cf-db notifications table.
+    Uses ON CONFLICT (recipient_creator_id, source_type, source_key) DO NOTHING
+    to prevent duplicates per the unique index 'uq_notifications_recipient_source'.
+    """
+    try:
+        await db.execute(text("""
+            INSERT INTO notifications (
+                recipient_creator_id, actor_creator_id, type, source_type, source_key,
+                title, body, link_url, campaign_id
+            ) VALUES (
+                :rid, :aid, :t, :st, :sk, :tt, :b, :lu, :cid
+            )
+            ON CONFLICT (recipient_creator_id, source_type, source_key) DO NOTHING
+        """), {
+            "rid": recipient_creator_id,
+            "aid": actor_id,
+            "t": n_type,
+            "st": n_type,
+            "sk": source_key,
+            "tt": title,
+            "b": body,
+            "lu": link_url,
+            "cid": campaign_id,
+        })
+    except Exception as e:
+        # Never block the main flow on notification failure
+        print(f"[notify] failed: {e}")
+
+
+@router.post("/reports/{report_id}/approve")
+async def approve_report(report_id: int, admin_id: int,
+                         db: AsyncSession = Depends(get_db)):
+    """
+    Admin reviews report and decides campaign STAYS active.
+    Marks the report resolved, notifies creator that their campaign was reviewed.
+    """
+    await _verify_admin(admin_id, db)
+
+    # Look up report + campaign details
+    r = await db.execute(text("""
+        SELECT cr.report_id, cr.reported_campaign_id, cr.reported_campaign_creator_id,
+               cr.reported_campaign_title_snapshot, cr.status
+          FROM campaign_reports cr
+         WHERE cr.report_id = :rid
+    """), {"rid": report_id})
+    row = r.mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Report not found")
+    if row["status"] == "resolved":
+        return {"status": "already_resolved", "report_id": report_id}
+
+    # Mark resolved
+    await db.execute(text("""
+        UPDATE campaign_reports SET status = 'resolved'
+         WHERE report_id = :rid
+    """), {"rid": report_id})
+
+    # Notify creator their campaign survived review
+    if row["reported_campaign_creator_id"] and row["reported_campaign_id"]:
+        await _notify_creator(
+            db,
+            recipient_creator_id=row["reported_campaign_creator_id"],
+            actor_id=None,  # admin action, not from a specific creator
+            n_type="report_resolved_kept",
+            source_key=f"report:{report_id}",
+            title="Your campaign was reviewed",
+            body=f'A report against your campaign "{row["reported_campaign_title_snapshot"]}" was reviewed and dismissed. Your campaign remains active.',
+            link_url=f"/project/{row['reported_campaign_id']}" if row["reported_campaign_id"] else None,
+            campaign_id=row["reported_campaign_id"],
+        )
+
+    await _log(db, admin_id, "approve_report", "report", str(report_id),
+               f"Kept campaign {row['reported_campaign_id']}")
+    await db.commit()
+    return {
+        "status": "approved",
+        "report_id": report_id,
+        "campaign_id": row["reported_campaign_id"],
+        "action": "kept",
+    }
+
+
+@router.post("/reports/{report_id}/reject")
+async def reject_report(report_id: int, admin_id: int,
+                        db: AsyncSession = Depends(get_db)):
+    """
+    Admin reviews report and decides campaign should be REMOVED.
+    Sets campaigns.status='removed', marks report resolved, notifies creator.
+    """
+    await _verify_admin(admin_id, db)
+
+    r = await db.execute(text("""
+        SELECT cr.report_id, cr.reported_campaign_id, cr.reported_campaign_creator_id,
+               cr.reported_campaign_title_snapshot, cr.status, cr.reason
+          FROM campaign_reports cr
+         WHERE cr.report_id = :rid
+    """), {"rid": report_id})
+    row = r.mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    # Mark campaign removed (only if it still exists)
+    if row["reported_campaign_id"]:
+        await db.execute(text("""
+            UPDATE campaigns SET status = 'removed'
+             WHERE campaign_id = :cid
+        """), {"cid": row["reported_campaign_id"]})
+
+    # Mark report resolved
+    await db.execute(text("""
+        UPDATE campaign_reports SET status = 'resolved'
+         WHERE report_id = :rid
+    """), {"rid": report_id})
+
+    # Notify creator
+    if row["reported_campaign_creator_id"]:
+        reason_text = row["reason"] or "policy violation"
+        await _notify_creator(
+            db,
+            recipient_creator_id=row["reported_campaign_creator_id"],
+            actor_id=None,
+            n_type="report_resolved_removed",
+            source_key=f"report:{report_id}",
+            title="Your campaign was removed",
+            body=f'Your campaign "{row["reported_campaign_title_snapshot"]}" was removed after review. Reason: {reason_text}',
+            link_url=None,
+            campaign_id=row["reported_campaign_id"],
+        )
+
+    await _log(db, admin_id, "reject_report", "report", str(report_id),
+               f"Removed campaign {row['reported_campaign_id']}: {row['reason']}")
+    await db.commit()
+    return {
+        "status": "rejected",
+        "report_id": report_id,
+        "campaign_id": row["reported_campaign_id"],
+        "action": "removed",
+    }
+
