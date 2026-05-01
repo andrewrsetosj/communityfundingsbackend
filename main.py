@@ -17,6 +17,7 @@ import sys
 import traceback
 from contextlib import asynccontextmanager
 from app.routes.campaign_page import router as campaign_page_router
+from app.routes.business_analytics_v2 import router as business_analytics_v2_router  # v100_tier3
 from fastapi import FastAPI, Header, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -114,6 +115,7 @@ app.add_middleware(
 # ─────────────────────────────────────────────────────────────────────────────
 
 app.include_router(auth_router)
+app.include_router(business_analytics_v2_router)  # v100_tier3
 app.include_router(campaigns_router)
 app.include_router(payments_router)
 app.include_router(refunds_router)
