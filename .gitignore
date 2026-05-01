@@ -6,3 +6,11 @@ __pycache__/
 *.db
 .DS_Store
 node_modules/
+
+# v100 — backup files generated during Tier 1 merge
+*.before_*
+*.broken_*
+*.bak
+.env.backup_*
+.env.local.backup_*
+

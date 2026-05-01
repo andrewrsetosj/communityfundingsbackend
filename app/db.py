@@ -201,7 +201,7 @@ async def upsert_creator(
                         ON CONFLICT (creator_id) DO UPDATE SET
                           {first_col} = COALESCE(EXCLUDED.{first_col}, creators.{first_col}),
                           last_name  = COALESCE(EXCLUDED.last_name, creators.last_name),
-                          email      = COALESCE(EXCLUDED.email, creators.email),
+                          email      = CASE WHEN NOT EXISTS (SELECT 1 FROM creators c2 WHERE c2.email = EXCLUDED.email AND c2.creator_id <> EXCLUDED.creator_id) THEN COALESCE(EXCLUDED.email, creators.email) ELSE creators.email END /* v100_email_safe_v5 */,
                           user_type  = COALESCE(EXCLUDED.user_type, creators.user_type)
                         RETURNING *;
                         """,
@@ -219,7 +219,7 @@ async def upsert_creator(
                         ON CONFLICT (creator_id) DO UPDATE SET
                           {first_col} = COALESCE(EXCLUDED.{first_col}, creators.{first_col}),
                           last_name  = COALESCE(EXCLUDED.last_name, creators.last_name),
-                          email      = COALESCE(EXCLUDED.email, creators.email)
+                          email      = CASE WHEN NOT EXISTS (SELECT 1 FROM creators c2 WHERE c2.email = EXCLUDED.email AND c2.creator_id <> EXCLUDED.creator_id) THEN COALESCE(EXCLUDED.email, creators.email) ELSE creators.email END /* v100_email_safe_v5 */
                         RETURNING *;
                         """,
                         creator_id,
@@ -236,7 +236,7 @@ async def upsert_creator(
                         ON CONFLICT (creator_id) DO UPDATE SET
                           {first_col} = COALESCE(EXCLUDED.{first_col}, creators.{first_col}),
                           last_name  = COALESCE(EXCLUDED.last_name, creators.last_name),
-                          email      = COALESCE(EXCLUDED.email, creators.email),
+                          email      = CASE WHEN NOT EXISTS (SELECT 1 FROM creators c2 WHERE c2.email = EXCLUDED.email AND c2.creator_id <> EXCLUDED.creator_id) THEN COALESCE(EXCLUDED.email, creators.email) ELSE creators.email END /* v100_email_safe_v5 */,
                           user_type  = COALESCE(EXCLUDED.user_type, creators.user_type),
                           time_creation = COALESCE(EXCLUDED.time_creation, creators.time_creation)
                         RETURNING *;
@@ -256,7 +256,7 @@ async def upsert_creator(
                         ON CONFLICT (creator_id) DO UPDATE SET
                           {first_col} = COALESCE(EXCLUDED.{first_col}, creators.{first_col}),
                           last_name  = COALESCE(EXCLUDED.last_name, creators.last_name),
-                          email      = COALESCE(EXCLUDED.email, creators.email),
+                          email      = CASE WHEN NOT EXISTS (SELECT 1 FROM creators c2 WHERE c2.email = EXCLUDED.email AND c2.creator_id <> EXCLUDED.creator_id) THEN COALESCE(EXCLUDED.email, creators.email) ELSE creators.email END /* v100_email_safe_v5 */,
                           time_creation = COALESCE(EXCLUDED.time_creation, creators.time_creation)
                         RETURNING *;
                         """,
