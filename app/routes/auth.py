@@ -257,9 +257,16 @@ async def clerk_sync(data: ClerkSyncRequest, db: AsyncSession = Depends(get_db))
         # Keep backend user info updated from Clerk
         user.user_type = 1  # always individual for Clerk users
 
-        if data.email:
-            user.email = data.email
-
+        # v100_email_precheck — only update email if no other creator owns it
+        if data.email and data.email != getattr(user, "email", None):
+            from sqlalchemy import text as _v100_sql_text
+            _v100_conflict = (await db.execute(
+                _v100_sql_text("SELECT 1 FROM creators WHERE email = :em AND creator_id <> :cid LIMIT 1"),
+                {"em": data.email, "cid": user.id}
+            )).first()
+            if _v100_conflict is None:
+                user.email = data.email
+            # else: another creator owns this email; skip update silently
         if data.image_url:
             user.avatar_url = data.image_url
 

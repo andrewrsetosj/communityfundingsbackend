@@ -53,6 +53,8 @@ from app.routes.locations import router as locations_router
 
 
 
+from app.routes.donations_v2 import router as donations_v2_router  # /* v100_donations_v2_router */
+from app.routes.ledger_v2 import router as ledger_v2_router  # /* v100_donations_v2_router */
 # ─────────────────────────────────────────────────────────────────────────────
 # Lifespan (startup / shutdown)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -131,6 +133,8 @@ app.include_router(notifications_router)
 app.include_router(organizations_router)
 app.include_router(locations_router)
 app.include_router(misc_reports_router)
+app.include_router(donations_v2_router)  # /* v100_donations_v2_router */
+app.include_router(ledger_v2_router)  # /* v100_donations_v2_router */
 app.include_router(donations.router)
 
 # ─────────────────────────────────────────────────────────────────────────────
