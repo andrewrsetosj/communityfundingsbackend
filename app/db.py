@@ -117,7 +117,9 @@ async def init_db() -> None:
             );
             """
         )
-        # Add profile columns if they don't exist yet
+        # Add profile columns if they don't exist yet.
+        # Wrapped in try/except so a non-owner DB user logs a warning instead
+        # of crashing the API on startup. ALTERs are no-ops once columns exist.
         for col, col_type in [
             ("hashed_password", "text"),
             ("bio", "text"),
@@ -126,20 +128,25 @@ async def init_db() -> None:
             ("state", "text"),
             ("time_zone", "text"),
         ]:
-            await conn.execute(f"""
-                ALTER TABLE creators ADD COLUMN IF NOT EXISTS {col} {col_type};
+            try:
+                await conn.execute(f"""
+                    ALTER TABLE creators ADD COLUMN IF NOT EXISTS {col} {col_type};
+                """)
+            except Exception as e:
+                print(f"WARN: skip ALTER creators ADD {col}: {e}")
+        try:
+            await conn.execute("""
+                ALTER TABLE creators ALTER COLUMN bio TYPE text;
             """)
-        # Ensure bio is TEXT (no length cap) — ADD COLUMN IF NOT EXISTS won't
-        # change the type if the column was already created as varchar(N).
-        await conn.execute("""
-            ALTER TABLE creators ALTER COLUMN bio TYPE text;
-        """)
-        # Ensure long-content columns in campaigns are TEXT — they may have been
-        # created as varchar(N) in an older migration and reject long content.
+        except Exception as e:
+            print(f"WARN: skip ALTER creators.bio TYPE: {e}")
         for col in ("description_html", "bio"):
-            await conn.execute(f"""
-                ALTER TABLE public.campaigns ALTER COLUMN {col} TYPE text;
-            """)
+            try:
+                await conn.execute(f"""
+                    ALTER TABLE public.campaigns ALTER COLUMN {col} TYPE text;
+                """)
+            except Exception as e:
+                print(f"WARN: skip ALTER campaigns.{col} TYPE: {e}")
     print("✅ asyncpg creators table ensured")
 
 
